@@ -1,0 +1,29 @@
+name: calliope
+
+# Local development database ONLY. Production connects to a managed Postgres
+# via DATABASE_URL injected from the environment — never commit real
+# credentials; see .env.example.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: calliope-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: calliope
+    ports:
+      # 5435 (not 5432/5433/5434): 5432 hosts a local PostgreSQL, 5433 is
+      # charon's and 5434 is cerberus's; mapping to a distinct port avoids
+      # silently connecting to the wrong server depending on which process
+      # wins the bind race.
+      - '5435:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
