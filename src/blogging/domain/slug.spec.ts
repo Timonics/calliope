@@ -73,6 +73,33 @@ describe('resolveCreateSlug', () => {
       }),
     ).rejects.toMatchObject({ code: 'category.conflict' });
   });
+
+  it('treats a provided slug that normalizes to empty as omitted', async () => {
+    // '!!!' slugifies to '' → the generate-from-source path (the ONLY
+    // path that auto-suffixes) takes over.
+    const taken = new Set(['my-post']);
+    await expect(
+      resolveCreateSlug({
+        provided: '!!!',
+        source: 'My Post',
+        fallback: 'post',
+        isTaken: (s) => Promise.resolve(taken.has(s)),
+        conflictCode: 'article.conflict',
+      }),
+    ).resolves.toBe('my-post-2');
+  });
+
+  it('treats a provided slug that normalizes to empty like an omitted one (CJK)', async () => {
+    await expect(
+      resolveCreateSlug({
+        provided: '日本語',
+        source: 'My Post',
+        fallback: 'post',
+        isTaken: () => Promise.resolve(false),
+        conflictCode: 'article.conflict',
+      }),
+    ).resolves.toBe('my-post');
+  });
 });
 
 describe('resolveUpdateSlug', () => {
@@ -93,6 +120,27 @@ describe('resolveUpdateSlug', () => {
         provided: 'old-slug',
         current: 'old-slug',
         isTaken: () => Promise.resolve(false),
+        conflictCode: 'tag.conflict',
+      }),
+    ).resolves.toBe('old-slug');
+  });
+
+  it('keeps the current slug when the rename normalizes to empty', async () => {
+    // A "rename" to nothing (punctuation-only / CJK-only input) is a
+    // no-op, NOT a 409 and NOT an empty-slug write.
+    await expect(
+      resolveUpdateSlug({
+        provided: '!!!',
+        current: 'old-slug',
+        isTaken: () => Promise.resolve(true), // must not even be consulted
+        conflictCode: 'tag.conflict',
+      }),
+    ).resolves.toBe('old-slug');
+    await expect(
+      resolveUpdateSlug({
+        provided: '日本語',
+        current: 'old-slug',
+        isTaken: () => Promise.resolve(true),
         conflictCode: 'tag.conflict',
       }),
     ).resolves.toBe('old-slug');

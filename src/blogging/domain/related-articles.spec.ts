@@ -5,6 +5,17 @@ import {
 
 const inBlog = new Set(['a1', 'a2', 'a3']);
 
+/** Run `fn`, asserting it throws a DomainError-shaped article.validation. */
+const expectValidationError = (fn: () => unknown): void => {
+  try {
+    fn();
+  } catch (error) {
+    expect(error).toMatchObject({ code: 'article.validation' });
+    return;
+  }
+  throw new Error('expected article.validation to be thrown');
+};
+
 describe('validateRelatedArticleIds', () => {
   it('accepts an empty list', () => {
     expect(validateRelatedArticleIds([], inBlog)).toEqual([]);
@@ -18,8 +29,8 @@ describe('validateRelatedArticleIds', () => {
   });
 
   it('rejects duplicates', () => {
-    expect(() => validateRelatedArticleIds(['a1', 'a1'], inBlog)).toThrow(
-      expect.objectContaining({ code: 'article.validation' }),
+    expectValidationError(() =>
+      validateRelatedArticleIds(['a1', 'a1'], inBlog),
     );
   });
 
@@ -29,20 +40,24 @@ describe('validateRelatedArticleIds', () => {
       (_, i) => `x${i}`,
     );
     const set = new Set(ids);
-    expect(() => validateRelatedArticleIds(ids, set)).toThrow(
-      expect.objectContaining({ code: 'article.validation' }),
-    );
+    expectValidationError(() => validateRelatedArticleIds(ids, set));
+  });
+
+  it('accepts exactly the cap boundary', () => {
+    const ids = Array.from({ length: MAX_RELATED_ARTICLES }, (_, i) => `x${i}`);
+    const set = new Set(ids);
+    expect(validateRelatedArticleIds(ids, set)).toEqual(ids);
   });
 
   it('rejects self-reference on update', () => {
-    expect(() =>
+    expectValidationError(() =>
       validateRelatedArticleIds(['a1', 'self'], inBlog, 'self'),
-    ).toThrow(expect.objectContaining({ code: 'article.validation' }));
+    );
   });
 
   it('rejects ids that are not articles of the same blog', () => {
-    expect(() => validateRelatedArticleIds(['a1', 'other'], inBlog)).toThrow(
-      expect.objectContaining({ code: 'article.validation' }),
+    expectValidationError(() =>
+      validateRelatedArticleIds(['a1', 'other'], inBlog),
     );
   });
 });

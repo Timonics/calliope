@@ -116,6 +116,10 @@ describe('DomainErrorFilter', () => {
       host,
     );
     expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json).toHaveBeenCalledWith({
+      code: 'domain.invariant_violation',
+      message: 'related article in another blog',
+    });
   });
 
   it('prefix table: an unlisted authorization.* code still maps to 401', () => {
@@ -129,6 +133,10 @@ describe('DomainErrorFilter', () => {
       host,
     );
     expect(response.status).toHaveBeenCalledWith(401);
+    expect(response.json).toHaveBeenCalledWith({
+      code: 'authorization.scope.insufficient',
+      message: 'Missing required scope(s): content:write',
+    });
   });
 
   it('maps an unlisted domain.* code to 409 via the prefix table', () => {
@@ -142,6 +150,10 @@ describe('DomainErrorFilter', () => {
     );
     // domain.* → 409 via prefix table
     expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json).toHaveBeenCalledWith({
+      code: 'domain.illegal_state',
+      message: 'cannot publish archived article',
+    });
   });
 
   it('maps a totally unknown domain code to 500 internal.error', () => {
@@ -195,6 +207,10 @@ describe('DomainErrorFilter', () => {
         host,
       );
       expect(response.status).toHaveBeenCalledWith(409);
+      expect(response.json).toHaveBeenCalledWith({
+        code: 'article.conflict',
+        message: 'archived is terminal',
+      });
     });
 
     it('maps *.validation to 400', () => {
@@ -204,6 +220,10 @@ describe('DomainErrorFilter', () => {
         host,
       );
       expect(response.status).toHaveBeenCalledWith(400);
+      expect(response.json).toHaveBeenCalledWith({
+        code: 'article.validation',
+        message: 'duplicate related id',
+      });
     });
 
     it('maps *.forbidden to 403', () => {
@@ -213,6 +233,10 @@ describe('DomainErrorFilter', () => {
         host,
       );
       expect(response.status).toHaveBeenCalledWith(403);
+      expect(response.json).toHaveBeenCalledWith({
+        code: 'blog.forbidden',
+        message: 'blog belongs to another tenant',
+      });
     });
 
     it('keeps existing exact codes working alongside the suffix table', () => {
@@ -222,6 +246,10 @@ describe('DomainErrorFilter', () => {
         host,
       );
       expect(response.status).toHaveBeenCalledWith(400);
+      expect(response.json).toHaveBeenCalledWith({
+        code: 'http.validation.failed',
+        message: 'Request validation failed',
+      });
     });
 
     it('includes meta detail in the rendered body when present', () => {

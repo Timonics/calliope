@@ -71,6 +71,9 @@ describeWithDb('Blog persistence (Prisma smoke)', () => {
       prisma.blog.create({
         data: { id: randomUUID(), tenantId, name: 'B', slug: 'dup' },
       }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({
+      // Unique-constraint violation on the (tenantId, slug) index.
+      code: 'P2002',
+    });
   });
 });

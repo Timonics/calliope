@@ -54,16 +54,46 @@ export function applyMigrations(): void {
   if (migrationsApplied || !testDatabaseUrl) {
     return;
   }
-  execSync('npx prisma migrate deploy', {
-    stdio: 'pipe',
-    env: { ...process.env, DATABASE_URL: testDatabaseUrl },
-  });
+  try {
+    execSync('npx prisma migrate deploy', {
+      stdio: 'pipe',
+      env: { ...process.env, DATABASE_URL: testDatabaseUrl },
+    });
+  } catch (error) {
+    // stdio:'pipe' swallows the failing migration's output by default —
+    // surface it so a broken migration is debuggable from the test log.
+    const output = [
+      (error as { stdout?: Buffer | null }).stdout,
+      (error as { stderr?: Buffer | null }).stderr,
+    ]
+      .filter((chunk): chunk is Buffer => Buffer.isBuffer(chunk))
+      .map((chunk) => chunk.toString('utf8'))
+      .join('\n');
+    console.error(`prisma migrate deploy failed:\n${output}`);
+    throw error;
+  }
   migrationsApplied = true;
 }
 
+/**
+ * Every public table the integration suite truncates between specs.
+ * Exported so the drift spec (test/truncate-drift.integration-spec.ts)
+ * can assert it against information_schema — a new model that nobody
+ * added here would otherwise leak state between specs silently.
+ */
+export const TRUNCATED_TABLES = [
+  'idempotency_keys',
+  '_ArticleToTag',
+  'articles',
+  'tags',
+  'categories',
+  'authors',
+  'blogs',
+] as const;
+
 export async function truncateAll(): Promise<void> {
   await integrationPrisma().$executeRawUnsafe(
-    'TRUNCATE TABLE "idempotency_keys", "_ArticleToTag", articles, tags, categories, authors, blogs CASCADE',
+    `TRUNCATE TABLE ${TRUNCATED_TABLES.map((t) => `"${t}"`).join(', ')} CASCADE`,
   );
 }
 

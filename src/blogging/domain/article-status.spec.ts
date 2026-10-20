@@ -53,15 +53,18 @@ describe('resolveStatusTransition', () => {
   });
 
   it('treats ARCHIVED as terminal', () => {
-    expect(() =>
-      resolveStatusTransition('ARCHIVED', 'DRAFT', null, NOW),
-    ).toThrow(
-      expect.objectContaining({ code: 'article.conflict' }) as DomainError,
-    );
-    expect(() =>
-      resolveStatusTransition('ARCHIVED', 'PUBLISHED', null, NOW),
-    ).toThrow(
-      expect.objectContaining({ code: 'article.conflict' }) as DomainError,
-    );
+    const attempt = (target: 'DRAFT' | 'PUBLISHED'): unknown => {
+      try {
+        resolveStatusTransition('ARCHIVED', target, null, NOW);
+      } catch (error) {
+        return error;
+      }
+      throw new Error(`expected ARCHIVED → ${target} to throw`);
+    };
+    for (const target of ['DRAFT', 'PUBLISHED'] as const) {
+      const error = attempt(target);
+      expect(error).toBeInstanceOf(DomainError);
+      expect(error).toMatchObject({ code: 'article.conflict' });
+    }
   });
 });
