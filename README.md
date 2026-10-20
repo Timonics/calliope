@@ -20,13 +20,30 @@ Everything else requires a cerberus-issued bearer token.
 
 ```bash
 npm run test                # unit
-npm run test:integration    # DB-backed; requires CALLIOPE_TEST_DB set
+CALLIOPE_TEST_DB=postgres://postgres:postgres@localhost:5435/calliope \
+  npm run test:integration  # DB-backed (skipped without the variable)
 ```
+
+Note: on CI (`CI=true`) the integration suite FAILS LOUDLY when
+`CALLIOPE_TEST_DB` is unset — a green run that tested nothing is a false
+signal.
 
 ## Conventions
 
-- No success envelope — controllers return bare JSON resources.
+- Single resources are returned **bare** (`POST/PATCH/GET` one resource →
+  the JSON resource itself). **List** endpoints always return an envelope:
+  `{ "data": [...], "meta": { "total", "page", "pageSize" } }`, with
+  `page` (1-based, ≤ 10_000) and `pageSize` (≤ 100) query params.
 - Errors are `{ "code": "...", "message": "..." }` (see
   `src/shared/interfaces/http/domain-error.filter.ts`).
 - Env is read via `src/shared/infrastructure/config.ts`: missing required
-  vars throw loudly; no silent defaults.
+  vars throw loudly; the only defaults are `PORT` and the cerberus
+  issuer/audience convention values (documented in that file).
+
+## Documentation
+
+- [`docs/API.md`](docs/API.md) — auth, endpoints, envelopes, error
+  catalogue, status enum + transitions, `?include=related`, the
+  optional-auth upgrade behavior, idempotency.
+- [`docs/openapi.yaml`](docs/openapi.yaml) — OpenAPI 3.1 spec for all v1
+  endpoints (validate with `npx @redocly/cli lint docs/openapi.yaml`).
