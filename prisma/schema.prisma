@@ -54,6 +54,7 @@ model Blog {
   articles   Article[]
 
   @@unique([tenantId, slug])
+  @@index([tenantId])
   @@map("blogs")
 }
 
@@ -91,6 +92,24 @@ model Category {
   @@map("categories")
 }
 
+/// A client-supplied idempotency key for article creation (the
+/// `Idempotency-Key` request header). A replayed (key, blog, endpoint)
+/// tuple returns the original article instead of creating a duplicate;
+/// entries older than the service-layer retention window (24h) are
+/// ignored. Plain strings, not a relation — the article row may outlive
+/// its key by design and the key must not constrain article deletion.
+model IdempotencyKey {
+  id        String   @id @db.Uuid
+  key       String
+  blogId    String   @db.Uuid
+  endpoint  String
+  articleId String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  @@unique([key, blogId, endpoint])
+  @@map("idempotency_keys")
+}
+
 /// Free-form label within a blog. Implicit many-to-many with Article via
 /// the Prisma-generated `_ArticleToTag` join table.
 model Tag {
@@ -119,7 +138,7 @@ model Article {
   authorId          String        @db.Uuid
   author            Author        @relation(fields: [authorId], references: [id], onDelete: Restrict)
   categoryId        String?       @db.Uuid
-  category          Category?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  category          Category?     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   title             String
   slug              String
   excerpt           String?
@@ -128,6 +147,10 @@ model Article {
   status            ArticleStatus @default(DRAFT)
   publishedAt       DateTime?
   relatedArticleIds String[]      @db.Uuid
+  /// Optimistic-locking counter. Incremented on every management
+  /// update; a client that passes `If-Match` (or `version`) gets a
+  /// 409 `article.conflict` when the row moved underneath them.
+  version           Int           @default(0)
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
@@ -136,6 +159,7 @@ model Article {
   @@unique([blogId, slug])
   @@index([blogId, status])
   @@index([blogId, categoryId])
+  @@index([blogId, authorId])
   @@map("articles")
 }
 
