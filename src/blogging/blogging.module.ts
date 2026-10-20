@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { PrincipalProvider } from '@timonics/auth-guard';
 import { JwksOptionalPrincipalResolver } from './application/optional-auth';
 import { ArticlesService } from './application/articles.service';
 import { AuthorsService } from './application/authors.service';
@@ -14,11 +15,7 @@ import {
   OPTIONAL_PRINCIPAL_RESOLVER,
   OptionalPrincipalResolver,
 } from './application/optional-auth';
-import {
-  cerberusAudience,
-  cerberusIssuer,
-  cerberusJwksUrl,
-} from '../shared/infrastructure/config';
+import { sharedAuthGuard } from '../shared/infrastructure/auth-guard.module';
 
 /**
  * The blogging bounded context — blogs, authors, categories, tags,
@@ -32,10 +29,17 @@ import {
  *
  * `OPTIONAL_PRINCIPAL_RESOLVER` backs the `@Public()` read routes that
  * upgrade to a management view when a valid Bearer token is presented.
- * It is provided here (not in the root) so integration tests can stub
- * it without touching global auth wiring.
+ * It REUSES the shared `PrincipalProvider` from `sharedAuthGuard` (DI,
+ * no second JWKS instance) and is provided here (not in the root) so
+ * integration tests can stub it without touching global auth wiring.
  */
 @Module({
+  imports: [
+    // Same dynamic-module reference as AppModule imports — Nest dedups
+    // by module key, so PrincipalProvider (JWKS client + cache) is the
+    // one shared instance, not a per-module rebuild.
+    sharedAuthGuard,
+  ],
   controllers: [
     BlogsController,
     AuthorsController,
@@ -51,14 +55,9 @@ import {
     ArticlesService,
     {
       provide: OPTIONAL_PRINCIPAL_RESOLVER,
-      useFactory: (): OptionalPrincipalResolver =>
-        new JwksOptionalPrincipalResolver({
-          jwksUrl: cerberusJwksUrl(),
-          issuer: cerberusIssuer(),
-          audience: cerberusAudience(),
-          jwksCacheTtlMs: 30_000,
-          jwksRequestTimeoutMs: 5_000,
-        }),
+      useFactory: (provider: PrincipalProvider): OptionalPrincipalResolver =>
+        new JwksOptionalPrincipalResolver(provider),
+      inject: [PrincipalProvider],
     },
   ],
 })

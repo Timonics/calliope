@@ -7,18 +7,22 @@ import { z } from 'zod';
  * `schema`.
  */
 export const paginationQuerySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
+  // page is capped so `skip` cannot be pushed into pathological ranges
+  // (skip ~ 1e6+ degrades to a sequential scan on every list route).
+  page: z.coerce.number().int().min(1).max(10_000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 });
 
 export type PaginationQuery = z.infer<typeof paginationQuerySchema>;
 
-export function toPage(query: PaginationQuery): {
+export interface Page {
   skip: number;
   take: number;
   page: number;
   pageSize: number;
-} {
+}
+
+export function toPage(query: PaginationQuery): Page {
   return {
     skip: (query.page - 1) * query.pageSize,
     take: query.pageSize,

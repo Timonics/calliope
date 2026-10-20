@@ -1,5 +1,12 @@
-import { ArticleStatus } from '@prisma/client';
 import { DomainError } from '../../shared/kernel/domain-error';
+
+/**
+ * Domain-local article status — the domain layer deliberately does NOT
+ * import `@prisma/client`; this type mirrors the Prisma enum's values
+ * and the service layer relies on the structural identity when mapping
+ * onto the persistence enum at the boundary.
+ */
+export type ArticleStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
 
 /**
  * Article status state machine — pure function so the transition table

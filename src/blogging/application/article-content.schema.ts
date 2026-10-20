@@ -9,13 +9,19 @@ import { z } from 'zod';
  * the clients that render the blocks.
  */
 export const articleContentBlockSchema = z.object({
-  type: z.string().min(1),
-  data: z.record(z.string(), z.unknown()),
+  type: z.string().min(1).max(200),
+  // zod v4 has no `ZodRecord.max` — cap the key count with a refine.
+  data: z
+    .record(z.string(), z.unknown())
+    .refine((value) => Object.keys(value).length <= 100, {
+      message: 'at most 100 data keys per block',
+    }),
 });
 
 export const articleContentSchema = z
   .array(articleContentBlockSchema)
-  .min(1, 'Article content must contain at least one block');
+  .min(1, 'Article content must contain at least one block')
+  .max(200, 'Article content accepts at most 200 blocks');
 
 export type ArticleContentBlock = z.infer<typeof articleContentBlockSchema>;
 export type ArticleContent = z.infer<typeof articleContentSchema>;

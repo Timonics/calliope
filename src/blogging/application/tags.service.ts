@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import type { Tag } from '@prisma/client';
+import type { Prisma, Tag } from '@prisma/client';
 import { DomainError } from '../../shared/kernel/domain-error';
 import { PrismaService } from '../../shared/infrastructure/prisma/prisma.service';
 import { assertBlogAccess, getBlogOr404 } from './blog-access';
 import { isUuid } from './id.util';
 import { rethrowMapped } from './prisma-errors';
 import { resolveCreateSlug, resolveUpdateSlug } from '../domain/slug';
-import type { Page } from './blogs.service';
+import type { Page } from './pagination';
 
 export interface CreateTagInput {
   name: string;
@@ -15,6 +15,20 @@ export interface CreateTagInput {
 }
 
 export type UpdateTagInput = Partial<CreateTagInput>;
+
+/**
+ * Public tag list projection — a small whitelist (id, name, slug; no
+ * `blogId`, no timestamps). Raw rows are management-only.
+ */
+const PUBLIC_TAG_SELECT = {
+  id: true,
+  name: true,
+  slug: true,
+} satisfies Prisma.TagSelect;
+
+export type PublicTagListItem = Prisma.TagGetPayload<{
+  select: typeof PUBLIC_TAG_SELECT;
+}>;
 
 @Injectable()
 export class TagsService {
@@ -44,23 +58,38 @@ export class TagsService {
 
   /**
    * Shared by the public and management list endpoints — see
-   * `AuthorsService.list` for the orgId semantics.
+   * `AuthorsService.list` for the orgId semantics and the
+   * public/management projections.
    */
   public async list(
     blogId: string,
-    orgId?: string,
-    page?: Page,
-  ): Promise<Tag[]> {
+    orgId: string | undefined,
+    page: Page,
+  ): Promise<{ data: Tag[] | PublicTagListItem[]; total: number }> {
     if (orgId === undefined) {
       await getBlogOr404(this.prisma, blogId);
     } else {
       await assertBlogAccess(this.prisma, blogId, orgId);
     }
-    return this.prisma.tag.findMany({
-      where: { blogId },
-      orderBy: { createdAt: 'asc' },
-      ...(page === undefined ? {} : { skip: page.skip, take: page.take }),
-    });
+    const where = { blogId };
+    const [total, data] = await this.prisma.$transaction([
+      this.prisma.tag.count({ where }),
+      orgId === undefined
+        ? this.prisma.tag.findMany({
+            where,
+            select: PUBLIC_TAG_SELECT,
+            orderBy: { createdAt: 'asc' },
+            skip: page.skip,
+            take: page.take,
+          })
+        : this.prisma.tag.findMany({
+            where,
+            orderBy: { createdAt: 'asc' },
+            skip: page.skip,
+            take: page.take,
+          }),
+    ]);
+    return { data, total };
   }
 
   public async update(
@@ -78,10 +107,18 @@ export class TagsService {
       conflictCode: 'tag.conflict',
     });
     try {
-      return await this.prisma.tag.update({
-        where: { id: tagId },
+      // Tenant-scoped write (defense in depth on top of mustExist).
+      const result = await this.prisma.tag.updateMany({
+        where: { id: tagId, blogId },
         data: { name: input.name, slug },
       });
+      if (result.count === 0) {
+        throw new DomainError(
+          'tag.not_found',
+          `Tag ${tagId} does not exist in blog ${blogId}`,
+        );
+      }
+      return this.mustExist(blogId, tagId);
     } catch (error) {
       rethrowMapped(error, 'tag');
     }
@@ -94,7 +131,21 @@ export class TagsService {
   ): Promise<void> {
     await assertBlogAccess(this.prisma, blogId, orgId);
     await this.mustExist(blogId, tagId);
-    await this.prisma.tag.delete({ where: { id: tagId } });
+    try {
+      // The implicit _ArticleToTag rows cascade; the try/rethrowMapped
+      // keeps any FK surprise on the friendly {code, message} path.
+      const result = await this.prisma.tag.deleteMany({
+        where: { id: tagId, blogId },
+      });
+      if (result.count === 0) {
+        throw new DomainError(
+          'tag.not_found',
+          `Tag ${tagId} does not exist in blog ${blogId}`,
+        );
+      }
+    } catch (error) {
+      rethrowMapped(error, 'tag');
+    }
   }
 
   private async slugTaken(blogId: string, slug: string): Promise<boolean> {

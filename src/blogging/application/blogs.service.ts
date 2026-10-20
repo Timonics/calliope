@@ -1,22 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { Blog } from '@prisma/client';
-import { DomainError } from '../../shared/kernel/domain-error';
 import { PrismaService } from '../../shared/infrastructure/prisma/prisma.service';
 import { assertBlogAccess } from './blog-access';
 import { rethrowMapped } from './prisma-errors';
 import { resolveCreateSlug } from '../domain/slug';
+import type { Page } from './pagination';
 
 export interface CreateBlogInput {
   name: string;
   slug?: string;
-}
-
-export interface Page {
-  skip: number;
-  take: number;
-  page: number;
-  pageSize: number;
 }
 
 @Injectable()
@@ -73,14 +66,8 @@ export class BlogsService {
     return { data, meta: { total, page: page.page, pageSize: page.pageSize } };
   }
 
+  /** Single fetch — `assertBlogAccess` already returns the full row. */
   public async get(blogId: string, orgId: string): Promise<Blog> {
-    await assertBlogAccess(this.prisma, blogId, orgId);
-    // assertBlogAccess loaded the row scoped to tenancy; re-fetch full.
-    const blog = await this.prisma.blog.findUnique({ where: { id: blogId } });
-    if (!blog) {
-      // Unreachable (assertBlogAccess already 404'd), keeps return type honest.
-      throw new DomainError('blog.not_found', `Blog ${blogId} does not exist`);
-    }
-    return blog;
+    return assertBlogAccess(this.prisma, blogId, orgId);
   }
 }

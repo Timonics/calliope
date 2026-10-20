@@ -116,9 +116,15 @@ export class DomainErrorFilter implements ExceptionFilter {
       return;
     }
 
-    // Expected — log at debug, return clean JSON.
+    // Expected — log at debug, return clean JSON. `detail` is server-only
+    // context: it goes to the log line, never into the response body
+    // (`toJSON` renders `clientMeta` as `meta`).
     this.logger.debug(
-      `[${status}] ${request.method} ${request.url} -> ${exception.code}: ${exception.message}`,
+      `[${status}] ${request.method} ${request.url} -> ${exception.code}: ${exception.message}${
+        exception.detail === undefined
+          ? ''
+          : ` | detail: ${JSON.stringify(exception.detail)}`
+      }`,
     );
     if (status === HttpStatus.UNAUTHORIZED) {
       response.setHeader('WWW-Authenticate', 'Bearer realm="calliope"');

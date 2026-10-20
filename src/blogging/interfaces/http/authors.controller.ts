@@ -15,7 +15,7 @@ import { CurrentPrincipal, Public, Scopes } from '@timonics/auth-guard';
 import type { Principal } from '@timonics/auth-guard';
 import type { Request } from 'express';
 import { AuthorsService } from '../../application/authors.service';
-import { toPage } from '../../application/pagination';
+import { toPage, listEnvelope } from '../../application/pagination';
 import { OPTIONAL_PRINCIPAL_RESOLVER } from '../../application/optional-auth';
 import type { OptionalPrincipalResolver } from '../../application/optional-auth';
 import { resolveOptionalPrincipal } from './optional-principal.helper';
@@ -34,9 +34,10 @@ export class AuthorsController {
   ) {}
 
   /**
-   * Public list (no token) — identical payload for management; when a
+   * Public list (no token) — `{data, meta}` envelope both ways; when a
    * Bearer token IS presented the tenancy check runs and a wrong-org
-   * caller gets `blog.forbidden` (403) instead of the list.
+   * caller gets `blog.forbidden` (403) instead of the list. Public
+   * items use the whitelist projection (id/name/bio/avatarUrl).
    */
   @Public()
   @Get()
@@ -49,7 +50,13 @@ export class AuthorsController {
       request,
       this.optionalAuth,
     );
-    return this.authors.list(blogId, principal?.orgId, toPage(query));
+    const page = toPage(query);
+    const { data, total } = await this.authors.list(
+      blogId,
+      principal?.orgId,
+      page,
+    );
+    return listEnvelope(data, total, page);
   }
 
   @Post()

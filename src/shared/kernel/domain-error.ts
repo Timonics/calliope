@@ -8,8 +8,15 @@
  *
  * Every domain error carries a stable, machine-readable `code` so that HTTP
  * adapters and SDKs can map it to a typed response without parsing strings.
- * `DomainErrorFilter` maps the code (exact match first, then prefix table)
- * to an HTTP status and renders `{code, message}` JSON.
+ * `DomainErrorFilter` maps the code (exact match first, then suffix/prefix
+ * tables) to an HTTP status and renders `{code, message}` JSON.
+ *
+ * Structured context splits by audience:
+ *
+ *   * `clientMeta` — safe to ship to the caller; rendered in the response
+ *     body as `meta`. Never include PII or secrets.
+ *   * `detail` — server-only context (ids, internal state) that
+ *     `DomainErrorFilter` logs but NEVER sends.
  */
 export type DomainErrorCode =
   // Authentication / authorization (cerberus-issued tokens)
@@ -45,19 +52,27 @@ export class DomainError extends Error {
   public readonly code: DomainErrorCode;
 
   /**
-   * Optional structured detail that callers may attach (e.g. which constraint
-   * failed, which field). Never include PII or secrets — this is logged.
+   * Structured context SAFE to render to the client (never PII or
+   * secrets) — serialized as `meta` in the HTTP response body.
+   */
+  public readonly clientMeta?: Readonly<Record<string, unknown>>;
+
+  /**
+   * Server-only context — logged by `DomainErrorFilter` alongside the
+   * request line, never shipped in the response body.
    */
   public readonly detail?: Readonly<Record<string, unknown>>;
 
   public constructor(
     code: DomainErrorCode,
     message: string,
+    clientMeta?: Record<string, unknown>,
     detail?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'DomainError';
     this.code = code;
+    this.clientMeta = clientMeta;
     this.detail = detail;
 
     // Restore prototype chain after super() — required when targeting ES5/ES2015
@@ -78,7 +93,7 @@ export class DomainError extends Error {
     return {
       code: this.code,
       message: this.message,
-      ...(this.detail === undefined ? {} : { meta: this.detail }),
+      ...(this.clientMeta === undefined ? {} : { meta: this.clientMeta }),
     };
   }
 }

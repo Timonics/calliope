@@ -31,4 +31,30 @@ describe('articleContentSchema', () => {
         .success,
     ).toBe(false);
   });
+
+  it('rejects more than 200 blocks', () => {
+    const blocks = Array.from({ length: 201 }, () => ({
+      type: 'paragraph',
+      data: {},
+    }));
+    expect(articleContentSchema.safeParse(blocks).success).toBe(false);
+    expect(articleContentSchema.safeParse(blocks.slice(0, 200)).success).toBe(
+      true,
+    );
+  });
+
+  it('rejects blocks with more than 100 data keys', () => {
+    const manyKeys = Object.fromEntries(
+      Array.from({ length: 101 }, (_, i) => [`k${i}`, 1]),
+    );
+    expect(
+      articleContentSchema.safeParse([{ type: 'paragraph', data: manyKeys }])
+        .success,
+    ).toBe(false);
+    expect(
+      articleContentSchema.safeParse([
+        { type: 'paragraph', data: { a: 1, b: 2 } },
+      ]).success,
+    ).toBe(true);
+  });
 });

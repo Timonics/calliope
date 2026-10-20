@@ -21,13 +21,35 @@ function required(name: string): string {
 /** Postgres connection string (from docker-compose: postgres://postgres:postgres@localhost:5435/calliope). */
 export const databaseUrl = (): string => required('DATABASE_URL');
 
-/** HTTP port the API listens on. */
-export const port = (): number => Number(process.env.PORT ?? 3002);
+/**
+ * HTTP port the API listens on. Validated: a non-numeric PORT fails
+ * loudly at bootstrap instead of NaN-ing into `listen()`.
+ */
+export const port = (): number => {
+  const raw = process.env.PORT ?? '3002';
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65_535) {
+    throw new Error(
+      `PORT must be an integer between 0 and 65535, got "${raw}"`,
+    );
+  }
+  return parsed;
+};
 
-/** Cerberus JWKS endpoint. No default — point it at the real cerberus. */
+/**
+ * Cerberus JWKS endpoint. No default — point it at the real cerberus.
+ */
 export const cerberusJwksUrl = (): string => required('CERBERUS_JWKS_URL');
 
-/** Expected `iss` claim on cerberus-issued tokens. */
+/**
+ * Expected `iss` claim on cerberus-issued tokens.
+ *
+ * Documented deviation from the strict "no defaults" rule: issuer and
+ * audience default to the cerberus convention values (charon
+ * convention — the cerberus deployment always issues these unless
+ * explicitly overridden). The JWKS endpoint, which genuinely varies
+ * per environment, has NO default above.
+ */
 export const cerberusIssuer = (): string =>
   process.env.CERBERUS_ISSUER ?? 'cerberus';
 

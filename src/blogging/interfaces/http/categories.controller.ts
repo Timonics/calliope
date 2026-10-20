@@ -15,7 +15,7 @@ import { CurrentPrincipal, Public, Scopes } from '@timonics/auth-guard';
 import type { Principal } from '@timonics/auth-guard';
 import type { Request } from 'express';
 import { CategoriesService } from '../../application/categories.service';
-import { toPage } from '../../application/pagination';
+import { toPage, listEnvelope } from '../../application/pagination';
 import { OPTIONAL_PRINCIPAL_RESOLVER } from '../../application/optional-auth';
 import type { OptionalPrincipalResolver } from '../../application/optional-auth';
 import { resolveOptionalPrincipal } from './optional-principal.helper';
@@ -33,7 +33,10 @@ export class CategoriesController {
     private readonly optionalAuth: OptionalPrincipalResolver,
   ) {}
 
-  /** See `AuthorsController.list` for the public/management split. */
+  /**
+   * `{data, meta}` envelope (see `AuthorsController.list`). Public
+   * items use the whitelist projection (id/name/slug/description).
+   */
   @Public()
   @Get()
   public async list(
@@ -45,7 +48,13 @@ export class CategoriesController {
       request,
       this.optionalAuth,
     );
-    return this.categories.list(blogId, principal?.orgId, toPage(query));
+    const page = toPage(query);
+    const { data, total } = await this.categories.list(
+      blogId,
+      principal?.orgId,
+      page,
+    );
+    return listEnvelope(data, total, page);
   }
 
   @Post()

@@ -6,6 +6,8 @@ import { MAX_RELATED_ARTICLES } from '../../../domain/related-articles';
 
 const articleStatusSchema = z.enum(['DRAFT', 'PUBLISHED', 'ARCHIVED']);
 
+const MAX_TAG_IDS_PER_ARTICLE = 50;
+
 const uuidArray = (max?: number): z.ZodType<string[]> =>
   max === undefined
     ? z.array(z.uuid())
@@ -13,46 +15,68 @@ const uuidArray = (max?: number): z.ZodType<string[]> =>
 
 export class CreateArticleDto {
   public static readonly schema = z.object({
+    /**
+     * Optional client-supplied UUID. Idempotency primitive: a replayed
+     * create with the same id returns the existing article (200) instead
+     * of inserting a duplicate — see ArticlesService.create.
+     */
+    id: z.uuid().optional(),
     title: z.string().min(1).max(300),
     slug: slugField,
-    excerpt: z.string().max(1000).optional(),
+    excerpt: z.string().max(1000).nullable().optional(),
     content: articleContentSchema,
-    coverImageUrl: z.url().optional(),
+    coverImageUrl: z.url().nullable().optional(),
     authorId: z.uuid(),
-    categoryId: z.uuid().optional(),
-    tagIds: uuidArray().optional(),
+    categoryId: z.uuid().nullable().optional(),
+    tagIds: uuidArray(MAX_TAG_IDS_PER_ARTICLE).optional(),
     status: articleStatusSchema.optional(),
     relatedArticleIds: uuidArray(MAX_RELATED_ARTICLES).optional(),
   });
 
+  public id?: string;
   public title!: string;
   public slug?: string;
-  public excerpt?: string;
+  public excerpt?: string | null;
   public content!: unknown;
-  public coverImageUrl?: string;
+  public coverImageUrl?: string | null;
   public authorId!: string;
-  public categoryId?: string;
+  public categoryId?: string | null;
   public tagIds?: string[];
   public status?: 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
   public relatedArticleIds?: string[];
 }
 
+/**
+ * PATCH semantics: every nullable field accepts explicit `null`, which
+ * CLEARS the column (`undefined`/`absent` keeps the current value).
+ * zod `.partial()` preserves the `.nullable()` wrapping of the create
+ * schema (verified: `safeParse({ excerpt: null })` succeeds).
+ */
 export class UpdateArticleDto {
   public static readonly schema = CreateArticleDto.schema
     .omit({ content: true })
-    .extend({ content: articleContentSchema.optional() })
+    .extend({
+      content: articleContentSchema.optional(),
+      /**
+       * Optimistic-locking expectation: when present, the update fails
+       * with 409 `article.conflict` if the row's `version` has moved on.
+       * The `If-Match` request header is an alternative carrier.
+       */
+      version: z.number().int().min(0).optional(),
+    })
     .partial();
 
   public title?: string;
   public slug?: string;
-  public excerpt?: string;
+  public excerpt?: string | null;
   public content?: unknown;
-  public coverImageUrl?: string;
+  public coverImageUrl?: string | null;
   public authorId?: string;
-  public categoryId?: string;
+  public categoryId?: string | null;
   public tagIds?: string[];
   public status?: 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
   public relatedArticleIds?: string[];
+  public version?: number;
 }
 
 /**

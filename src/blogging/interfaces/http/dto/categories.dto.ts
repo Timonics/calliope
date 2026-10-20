@@ -6,20 +6,21 @@ export class CreateCategoryDto {
   public static readonly schema = z.object({
     name: z.string().min(1).max(200),
     slug: slugField,
-    description: z.string().max(2000).optional(),
+    description: z.string().max(2000).nullable().optional(),
   });
 
   public name!: string;
   public slug?: string;
-  public description?: string;
+  public description?: string | null;
 }
 
+/** PATCH: `null` clears the column, absent keeps the current value. */
 export class UpdateCategoryDto {
   public static readonly schema = CreateCategoryDto.schema.partial();
 
   public name?: string;
   public slug?: string;
-  public description?: string;
+  public description?: string | null;
 }
 
 export class ListCategoriesQueryDto {

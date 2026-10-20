@@ -1,3 +1,4 @@
+import type { Blog } from '@prisma/client';
 import { DomainError } from '../../shared/kernel/domain-error';
 import { isUuid } from './id.util';
 
@@ -11,16 +12,14 @@ import { isUuid } from './id.util';
  *     `blog.not_found` (404); another tenant's blog → `blog.forbidden`
  *     (403). The 403-not-404 choice on cross-tenant ids is deliberate:
  *     the caller IS authenticated, so telling them "this exists but is
- *     not yours" leaks nothing to the unauthenticated.
+ *     not yours" leaks nothing to the unauthenticated. Returns the full
+ *     blog row so callers (e.g. `BlogsService.get`) don't re-fetch.
  *   * `getBlogOr404` — public routes: existence only, no tenant check
  *     (the blog UUID is the public identifier).
  */
 export interface BlogLookup {
   blog: {
-    findUnique(args: {
-      where: { id: string };
-      select: { id: true; tenantId: true };
-    }): Promise<{ id: string; tenantId: string } | null>;
+    findUnique(args: { where: { id: string } }): Promise<Blog | null>;
   };
 }
 
@@ -28,14 +27,11 @@ export async function assertBlogAccess(
   prisma: BlogLookup,
   blogId: string,
   orgId: string,
-): Promise<{ id: string; tenantId: string }> {
+): Promise<Blog> {
   if (!isUuid(blogId)) {
     throw new DomainError('blog.not_found', `Blog ${blogId} does not exist`);
   }
-  const blog = await prisma.blog.findUnique({
-    where: { id: blogId },
-    select: { id: true, tenantId: true },
-  });
+  const blog = await prisma.blog.findUnique({ where: { id: blogId } });
   if (!blog) {
     throw new DomainError('blog.not_found', `Blog ${blogId} does not exist`);
   }
@@ -52,14 +48,11 @@ export async function assertBlogAccess(
 export async function getBlogOr404(
   prisma: BlogLookup,
   blogId: string,
-): Promise<{ id: string; tenantId: string }> {
+): Promise<Blog> {
   if (!isUuid(blogId)) {
     throw new DomainError('blog.not_found', `Blog ${blogId} does not exist`);
   }
-  const blog = await prisma.blog.findUnique({
-    where: { id: blogId },
-    select: { id: true, tenantId: true },
-  });
+  const blog = await prisma.blog.findUnique({ where: { id: blogId } });
   if (!blog) {
     throw new DomainError('blog.not_found', `Blog ${blogId} does not exist`);
   }

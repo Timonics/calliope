@@ -1,21 +1,38 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import type { Category } from '@prisma/client';
+import type { Category, Prisma } from '@prisma/client';
 import { DomainError } from '../../shared/kernel/domain-error';
 import { PrismaService } from '../../shared/infrastructure/prisma/prisma.service';
 import { assertBlogAccess, getBlogOr404 } from './blog-access';
 import { isUuid } from './id.util';
 import { rethrowMapped } from './prisma-errors';
 import { resolveCreateSlug, resolveUpdateSlug } from '../domain/slug';
-import type { Page } from './blogs.service';
+import type { Page } from './pagination';
 
 export interface CreateCategoryInput {
   name: string;
   slug?: string;
-  description?: string;
+  description?: string | null;
 }
 
+/** PATCH semantics: `null` clears the column, absent keeps it. */
 export type UpdateCategoryInput = Partial<CreateCategoryInput>;
+
+/**
+ * Public category list projection — a small whitelist (id, name, slug,
+ * description; no `blogId`, no timestamps). Raw rows are
+ * management-only.
+ */
+const PUBLIC_CATEGORY_SELECT = {
+  id: true,
+  name: true,
+  slug: true,
+  description: true,
+} satisfies Prisma.CategorySelect;
+
+export type PublicCategoryListItem = Prisma.CategoryGetPayload<{
+  select: typeof PUBLIC_CATEGORY_SELECT;
+}>;
 
 @Injectable()
 export class CategoriesService {
@@ -51,23 +68,38 @@ export class CategoriesService {
 
   /**
    * Shared by the public and management list endpoints — see
-   * `AuthorsService.list` for the orgId semantics.
+   * `AuthorsService.list` for the orgId semantics and the
+   * public/management projections.
    */
   public async list(
     blogId: string,
-    orgId?: string,
-    page?: Page,
-  ): Promise<Category[]> {
+    orgId: string | undefined,
+    page: Page,
+  ): Promise<{ data: Category[] | PublicCategoryListItem[]; total: number }> {
     if (orgId === undefined) {
       await getBlogOr404(this.prisma, blogId);
     } else {
       await assertBlogAccess(this.prisma, blogId, orgId);
     }
-    return this.prisma.category.findMany({
-      where: { blogId },
-      orderBy: { createdAt: 'asc' },
-      ...(page === undefined ? {} : { skip: page.skip, take: page.take }),
-    });
+    const where = { blogId };
+    const [total, data] = await this.prisma.$transaction([
+      this.prisma.category.count({ where }),
+      orgId === undefined
+        ? this.prisma.category.findMany({
+            where,
+            select: PUBLIC_CATEGORY_SELECT,
+            orderBy: { createdAt: 'asc' },
+            skip: page.skip,
+            take: page.take,
+          })
+        : this.prisma.category.findMany({
+            where,
+            orderBy: { createdAt: 'asc' },
+            skip: page.skip,
+            take: page.take,
+          }),
+    ]);
+    return { data, total };
   }
 
   public async update(
@@ -85,15 +117,30 @@ export class CategoriesService {
       conflictCode: 'category.conflict',
     });
     try {
-      return await this.prisma.category.update({
-        where: { id: categoryId },
+      // Tenant-scoped write (defense in depth on top of mustExist).
+      const result = await this.prisma.category.updateMany({
+        where: { id: categoryId, blogId },
         data: { name: input.name, slug, description: input.description },
       });
+      if (result.count === 0) {
+        throw new DomainError(
+          'category.not_found',
+          `Category ${categoryId} does not exist in blog ${blogId}`,
+        );
+      }
+      return this.mustExist(blogId, categoryId);
     } catch (error) {
       rethrowMapped(error, 'category');
     }
   }
 
+  /**
+   * Delete policy: the Category→Article FK is `onDelete: Restrict`
+   * (schema), so the app owns the friendly 409 — articles referencing
+   * the category make the delete a `category.conflict` rather than a
+   * driver error. The pre-check below keeps the message informative;
+   * the FK constraint is the race backstop (P2003 → same mapping).
+   */
   public async remove(
     blogId: string,
     orgId: string,
@@ -111,7 +158,19 @@ export class CategoriesService {
         { articleCount },
       );
     }
-    await this.prisma.category.delete({ where: { id: categoryId } });
+    try {
+      const result = await this.prisma.category.deleteMany({
+        where: { id: categoryId, blogId },
+      });
+      if (result.count === 0) {
+        throw new DomainError(
+          'category.not_found',
+          `Category ${categoryId} does not exist in blog ${blogId}`,
+        );
+      }
+    } catch (error) {
+      rethrowMapped(error, 'category');
+    }
   }
 
   private async slugTaken(blogId: string, slug: string): Promise<boolean> {

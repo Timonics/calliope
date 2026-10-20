@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   Inject,
   Param,
@@ -10,10 +11,11 @@ import {
   Post,
   Query,
   Req,
+  Res,
 } from '@nestjs/common';
 import { CurrentPrincipal, Public, Scopes } from '@timonics/auth-guard';
 import type { Principal } from '@timonics/auth-guard';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { ArticlesService } from '../../application/articles.service';
 import { toPublicArticle } from '../../application/article-projection';
 import { toPage, listEnvelope } from '../../application/pagination';
@@ -90,6 +92,10 @@ export class ArticlesController {
    *     (wrong org → `blog.forbidden`);
    *   * UUID param, no token → `article.not_found` (ids are not public
    *     identifiers; anonymous callers get no existence signal);
+   *   * UUID param + token but no article with that id → falls back to
+   *     a public slug lookup before 404ing — a lowercase UUID is a
+   *     valid slug shape, so a slug that happens to be UUID-formatted
+   *     still resolves (permanent edge, public projection);
    *   * non-UUID param → public slug lookup, published-only, public
    *     projection; `?include=related` expands the curated related set
    *     inline (published related articles only, original order).
@@ -106,14 +112,29 @@ export class ArticlesController {
       request,
       this.optionalAuth,
     );
-    if (isUuid(idOrSlug)) {
-      if (principal === undefined) {
-        throw new DomainError(
-          'article.not_found',
-          `Article ${idOrSlug} does not exist`,
+    if (isUuid(idOrSlug) && principal !== undefined) {
+      try {
+        return await this.articles.getManagement(
+          blogId,
+          principal.orgId,
+          idOrSlug,
         );
+      } catch (error) {
+        if (
+          !(error instanceof DomainError) ||
+          error.code !== 'article.not_found'
+        ) {
+          throw error;
+        }
+        // fall through to the public slug lookup below
       }
-      return this.articles.getManagement(blogId, principal.orgId, idOrSlug);
+    }
+    if (isUuid(idOrSlug)) {
+      // UUID param without a token: ids are not public identifiers.
+      throw new DomainError(
+        'article.not_found',
+        `Article ${idOrSlug} does not exist`,
+      );
     }
     const { article, related } = await this.articles.getPublicBySlug(
       blogId,
@@ -136,25 +157,58 @@ export class ArticlesController {
     return this.articles.getRelated(blogId, principal.orgId, articleId);
   }
 
+  /**
+   * Idempotent create. Two client-controlled mechanisms (see
+   * `ArticlesService.create`):
+   *
+   *   * `Idempotency-Key` request header — the first create stores
+   *     (key, blog, endpoint → articleId) for 24h; a replay returns the
+   *     stored article with **200** instead of creating a duplicate;
+   *   * client-supplied `id` (UUID) in the body — used verbatim, with
+   *     upsert-on-conflict semantics: a replay returns the existing
+   *     article with **200**.
+   *
+   * A fresh create answers 201.
+   */
   @Post()
   @Scopes('content:write')
-  public create(
+  public async create(
     @CurrentPrincipal() principal: Principal,
     @Param('blogId') blogId: string,
     @Body() dto: CreateArticleDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Res({ passthrough: true }) response: Response,
   ) {
-    return this.articles.create(blogId, principal.orgId, dto);
+    const { article, replayed } = await this.articles.create(
+      blogId,
+      principal.orgId,
+      dto,
+      idempotencyKey,
+    );
+    response.status(replayed ? 200 : 201);
+    return article;
   }
 
+  /**
+   * Optimistic locking: `If-Match: <version>` (or a `version` field in
+   * the body) makes the write conditional on the row still carrying
+   * that version — a stale write is 409 `article.conflict`. Absent =
+   * last-write-wins (the version still increments).
+   */
   @Patch(':articleId')
   @Scopes('content:write')
-  public update(
+  public async update(
     @CurrentPrincipal() principal: Principal,
     @Param('blogId') blogId: string,
     @Param('articleId') articleId: string,
     @Body() dto: UpdateArticleDto,
+    @Headers('if-match') ifMatch: string | undefined,
   ) {
-    return this.articles.update(blogId, principal.orgId, articleId, dto);
+    const version = resolveExpectedVersion(dto.version, ifMatch);
+    return this.articles.update(blogId, principal.orgId, articleId, {
+      ...dto,
+      ...(version === undefined ? {} : { version }),
+    });
   }
 
   @Delete(':articleId')
@@ -167,4 +221,26 @@ export class ArticlesController {
   ): Promise<void> {
     await this.articles.remove(blogId, principal.orgId, articleId);
   }
+}
+
+/**
+ * Combine the `If-Match` header and the body `version` field into the
+ * expected-version number. A non-numeric header is a 400 — a garbage
+ * precondition is an input error, not a conflict.
+ */
+function resolveExpectedVersion(
+  bodyVersion: number | undefined,
+  ifMatch: string | undefined,
+): number | undefined {
+  if (ifMatch === undefined) {
+    return bodyVersion;
+  }
+  const trimmed = ifMatch.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new DomainError(
+      'http.validation.failed',
+      `If-Match must be a non-negative integer version, got "${ifMatch}"`,
+    );
+  }
+  return Number(trimmed);
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import type { Article, ArticleStatus, Prisma } from '@prisma/client';
+import type { Article } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { DomainError } from '../../shared/kernel/domain-error';
 import { PrismaService } from '../../shared/infrastructure/prisma/prisma.service';
 import { assertBlogAccess, getBlogOr404 } from './blog-access';
@@ -8,30 +9,43 @@ import { isUuid } from './id.util';
 import { rethrowMapped } from './prisma-errors';
 import { resolveCreateSlug, resolveUpdateSlug } from '../domain/slug';
 import { resolveStatusTransition } from '../domain/article-status';
+import type { ArticleStatus } from '../domain/article-status';
 import { validateRelatedArticleIds } from '../domain/related-articles';
-import type { Page } from './blogs.service';
+import type { Page } from './pagination';
 
 export interface CreateArticleInput {
+  /**
+   * Optional client-supplied UUID — the idempotency primitive (see
+   * `create`).
+   */
+  id?: string;
   title: string;
   slug?: string;
-  excerpt?: string;
+  excerpt?: string | null;
   content: unknown; // validated upstream by articleContentSchema (DTO pipe)
-  coverImageUrl?: string;
+  coverImageUrl?: string | null;
   authorId: string;
-  categoryId?: string;
+  categoryId?: string | null;
   tagIds?: string[];
   status?: ArticleStatus;
   relatedArticleIds?: string[];
 }
 
-export type UpdateArticleInput = Partial<CreateArticleInput>;
+export type UpdateArticleInput = Partial<CreateArticleInput> & {
+  /** Optimistic-lock expectation; absent = last-write-wins. */
+  version?: number;
+};
 
 export interface ArticleListFilters {
   status?: ArticleStatus;
   authorId?: string;
   categoryId?: string;
   tagId?: string;
-  /** case-insensitive contains on title/excerpt */
+  /**
+   * Case-insensitive contains on title/excerpt. `%`, `_` and `\` are
+   * escaped before the ILIKE so the term is matched literally (see
+   * `escapeLikeTerm`).
+   */
   q?: string;
 }
 
@@ -45,18 +59,46 @@ type ArticleWithRelations = Prisma.ArticleGetPayload<{
   include: typeof ARTICLE_INCLUDE;
 }>;
 
+/** Management list rows carry everything except the heavy `content` JSON. */
+type ArticleListItem = Prisma.ArticleGetPayload<{
+  include: typeof ARTICLE_INCLUDE;
+  omit: { content: true };
+}>;
+
+/** Replays are honored for this long; older keys are treated as unseen. */
+const IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Endpoint discriminator stored with each idempotency key. */
+const IDEMPOTENCY_ENDPOINT = 'articles.create';
+
 @Injectable()
 export class ArticlesService {
   public constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Idempotent create. Two client-controlled mechanisms, either works:
+   *
+   *   * client-supplied `id` in the body — used verbatim as the article
+   *     id (upsert-on-conflict semantics: a P2002 on that id means a
+   *     replay or a lost response, so the existing row is fetched and
+   *     returned with 200 instead of erroring);
+   *   * `Idempotency-Key` request header — stored in `idempotency_keys`
+   *     (key + blog + endpoint, 24h retention) after the first create;
+   *     a replay within the window returns the stored article with 200.
+   *
+   * Both checks and the insert run in one transaction; the unique
+   * constraints are the race backstop. Returns `replayed` so the
+   * controller can answer 200 (replay) vs 201 (created).
+   */
   public async create(
     blogId: string,
     orgId: string,
     input: CreateArticleInput,
-  ): Promise<ArticleWithRelations> {
+    idempotencyKey?: string,
+  ): Promise<{ article: ArticleWithRelations; replayed: boolean }> {
     await assertBlogAccess(this.prisma, blogId, orgId);
     await this.assertAuthorInBlog(blogId, input.authorId);
-    if (input.categoryId !== undefined) {
+    if (input.categoryId != null) {
       await this.assertCategoryInBlog(blogId, input.categoryId);
     }
     const tagIds =
@@ -84,27 +126,88 @@ export class ArticlesService {
     );
 
     try {
-      return await this.prisma.article.create({
-        data: {
-          id: randomUUID(),
-          blogId,
-          authorId: input.authorId,
-          categoryId: input.categoryId ?? null,
-          title: input.title,
-          slug,
-          excerpt: input.excerpt,
-          content: input.content as Prisma.InputJsonValue,
-          coverImageUrl: input.coverImageUrl,
-          status,
-          publishedAt,
-          relatedArticleIds: relatedIds ?? [],
-          ...(tagIds === undefined
-            ? {}
-            : { tags: { connect: tagIds.map((id) => ({ id })) } }),
-        },
-        include: ARTICLE_INCLUDE,
+      return await this.prisma.$transaction(async (tx) => {
+        if (idempotencyKey !== undefined) {
+          const seen = await tx.idempotencyKey.findUnique({
+            where: {
+              key_blogId_endpoint: {
+                key: idempotencyKey,
+                blogId,
+                endpoint: IDEMPOTENCY_ENDPOINT,
+              },
+            },
+          });
+          if (seen !== null) {
+            if (this.isFreshKey(seen.createdAt)) {
+              const existing = await tx.article.findFirst({
+                where: { id: seen.articleId, blogId },
+                include: ARTICLE_INCLUDE,
+              });
+              if (existing !== null) {
+                return { article: existing, replayed: true };
+              }
+            }
+            // Article gone (deleted) or key expired — the mapping is
+            // dead weight; drop it so the insert below can re-use it.
+            await tx.idempotencyKey.delete({ where: { id: seen.id } });
+          }
+        }
+        if (input.id !== undefined) {
+          const existing = await tx.article.findFirst({
+            where: { id: input.id, blogId },
+            include: ARTICLE_INCLUDE,
+          });
+          if (existing !== null) {
+            return { article: existing, replayed: true };
+          }
+        }
+        const article = await tx.article.create({
+          data: {
+            id: input.id ?? randomUUID(),
+            blogId,
+            authorId: input.authorId,
+            categoryId: input.categoryId ?? null,
+            title: input.title,
+            slug,
+            excerpt: input.excerpt,
+            content: input.content as Prisma.InputJsonValue,
+            coverImageUrl: input.coverImageUrl,
+            status,
+            publishedAt,
+            relatedArticleIds: relatedIds ?? [],
+            ...(tagIds === undefined
+              ? {}
+              : { tags: { connect: tagIds.map((id) => ({ id })) } }),
+          },
+          include: ARTICLE_INCLUDE,
+        });
+        if (idempotencyKey !== undefined) {
+          await tx.idempotencyKey.create({
+            data: {
+              id: randomUUID(),
+              key: idempotencyKey,
+              blogId,
+              endpoint: IDEMPOTENCY_ENDPOINT,
+              articleId: article.id,
+            },
+          });
+        }
+        return { article, replayed: false };
       });
     } catch (error) {
+      // Race backstop: a concurrent request with the same idempotency
+      // key or client-supplied id committed between our check and our
+      // insert (unique constraint fires). Fetch the winner and replay.
+      if (this.replayAfterRace(idempotencyKey, input.id, error)) {
+        const raced = await this.findReplayTarget(
+          blogId,
+          idempotencyKey,
+          input.id,
+        );
+        if (raced !== null) {
+          return { article: raced, replayed: true };
+        }
+      }
       rethrowMapped(error, 'article');
     }
   }
@@ -115,9 +218,15 @@ export class ArticlesService {
     orgId: string,
     filters: ArticleListFilters,
     page: Page,
-  ): Promise<{ data: ArticleWithRelations[]; total: number }> {
+  ): Promise<{ data: ArticleListItem[]; total: number }> {
     await assertBlogAccess(this.prisma, blogId, orgId);
-    return this.list(blogId, filters, page);
+    const { data, total } = await this.list(
+      blogId,
+      filters,
+      page,
+      'management',
+    );
+    return { data: data as ArticleListItem[], total };
   }
 
   /** Public list — published only, always. */
@@ -127,7 +236,13 @@ export class ArticlesService {
     page: Page,
   ): Promise<{ data: ArticleWithRelations[]; total: number }> {
     await getBlogOr404(this.prisma, blogId);
-    return this.list(blogId, { ...filters, status: 'PUBLISHED' }, page);
+    const { data, total } = await this.list(
+      blogId,
+      { ...filters, status: 'PUBLISHED' },
+      page,
+      'public',
+    );
+    return { data: data as ArticleWithRelations[], total };
   }
 
   public async getManagement(
@@ -188,6 +303,21 @@ export class ArticlesService {
     return this.resolveRelated(blogId, article, undefined);
   }
 
+  /**
+   * PATCH semantics: `null` CLEARS a nullable column (`excerpt`,
+   * `coverImageUrl`, `categoryId`), absent/undefined keeps the current
+   * value — the DTO layer (`.nullable().optional()` + `.partial()`)
+   * preserves that distinction through validation.
+   *
+   * Optimistic locking: when `input.version` is present the write is
+   * conditional on the row still carrying that version; a mismatch is
+   * 409 `article.conflict` (absent = last-write-wins, but the version
+   * still increments so future optimistic writers aren't blind).
+   *
+   * The scalar write is tenant-scoped via `updateMany` (defense in
+   * depth on top of `mustExist`); relation writes (tags) run inside the
+   * same transaction against the now-verified id.
+   */
   public async update(
     blogId: string,
     orgId: string,
@@ -200,10 +330,7 @@ export class ArticlesService {
     if (input.authorId !== undefined && input.authorId !== current.authorId) {
       await this.assertAuthorInBlog(blogId, input.authorId);
     }
-    if (
-      input.categoryId !== undefined &&
-      input.categoryId !== current.categoryId
-    ) {
+    if (input.categoryId != null && input.categoryId !== current.categoryId) {
       await this.assertCategoryInBlog(blogId, input.categoryId);
     }
     const tagIds =
@@ -233,27 +360,60 @@ export class ArticlesService {
     );
 
     try {
-      return await this.prisma.article.update({
-        where: { id: articleId },
-        data: {
-          title: input.title,
-          slug,
-          excerpt: input.excerpt,
-          content:
-            input.content === undefined
-              ? undefined
-              : (input.content as Prisma.InputJsonValue),
-          coverImageUrl: input.coverImageUrl,
-          authorId: input.authorId,
-          categoryId: input.categoryId,
-          status,
-          publishedAt,
-          relatedArticleIds: relatedIds,
-          ...(tagIds === undefined
-            ? {}
-            : { tags: { set: tagIds.map((id) => ({ id })) } }),
-        },
-        include: ARTICLE_INCLUDE,
+      return await this.prisma.$transaction(async (tx) => {
+        const result = await tx.article.updateMany({
+          where: {
+            id: articleId,
+            blogId,
+            ...(input.version === undefined ? {} : { version: input.version }),
+          },
+          data: {
+            title: input.title,
+            slug,
+            excerpt: input.excerpt,
+            content:
+              input.content === undefined
+                ? undefined
+                : (input.content as Prisma.InputJsonValue),
+            coverImageUrl: input.coverImageUrl,
+            authorId: input.authorId,
+            categoryId: input.categoryId,
+            status,
+            publishedAt,
+            relatedArticleIds: relatedIds,
+            version: { increment: 1 },
+          },
+        });
+        if (result.count === 0) {
+          // `mustExist` already verified id+blog, so a zero-count here
+          // can only be the optimistic-lock guard firing.
+          throw new DomainError(
+            'article.conflict',
+            `Article ${articleId} was modified concurrently (expected version ${input.version}, current version ${current.version})`,
+            { expectedVersion: input.version, currentVersion: current.version },
+            { articleId, blogId },
+          );
+        }
+        if (tagIds !== undefined) {
+          // updateMany cannot carry nested relation writes; the id is
+          // tenant-verified by the updateMany above.
+          await tx.article.update({
+            where: { id: articleId },
+            data: { tags: { set: tagIds.map((id) => ({ id })) } },
+          });
+        }
+        const updated = await tx.article.findFirst({
+          where: { id: articleId, blogId },
+          include: ARTICLE_INCLUDE,
+        });
+        if (updated === null) {
+          // Unreachable (updateMany matched exactly this row).
+          throw new DomainError(
+            'article.not_found',
+            `Article ${articleId} does not exist in blog ${blogId}`,
+          );
+        }
+        return updated;
       });
     } catch (error) {
       rethrowMapped(error, 'article');
@@ -267,18 +427,45 @@ export class ArticlesService {
   ): Promise<void> {
     await assertBlogAccess(this.prisma, blogId, orgId);
     await this.mustExist(blogId, articleId);
-    await this.prisma.article.delete({ where: { id: articleId } });
+    try {
+      const result = await this.prisma.article.deleteMany({
+        where: { id: articleId, blogId },
+      });
+      if (result.count === 0) {
+        throw new DomainError(
+          'article.not_found',
+          `Article ${articleId} does not exist in blog ${blogId}`,
+        );
+      }
+    } catch (error) {
+      rethrowMapped(error, 'article');
+    }
   }
 
   // ---------------------------------------------------------------------------
   // internals
   // ---------------------------------------------------------------------------
 
+  /**
+   * Shared list core. Ordering differs by audience (documented choice):
+   * the management list sorts by `createdAt desc` — `publishedAt` is
+   * null for drafts, and Postgres sorts nulls FIRST in DESC order,
+   * which buries freshly-created drafts under old published posts. The
+   * public list keeps `publishedAt desc` (every row there is published,
+   * so the field is never null).
+   */
   private async list(
     blogId: string,
     filters: ArticleListFilters,
     page: Page,
-  ): Promise<{ data: ArticleWithRelations[]; total: number }> {
+    mode: 'management' | 'public',
+  ): Promise<{
+    data: ArticleListItem[] | ArticleWithRelations[];
+    total: number;
+  }> {
+    if (filters.q !== undefined) {
+      return this.searchList(blogId, { ...filters, q: filters.q }, page, mode);
+    }
     const where: Prisma.ArticleWhereInput = {
       blogId,
       ...(filters.status === undefined ? {} : { status: filters.status }),
@@ -289,26 +476,80 @@ export class ArticlesService {
       ...(filters.tagId === undefined
         ? {}
         : { tags: { some: { id: filters.tagId } } }),
-      ...(filters.q === undefined
-        ? {}
-        : {
-            OR: [
-              { title: { contains: filters.q, mode: 'insensitive' } },
-              { excerpt: { contains: filters.q, mode: 'insensitive' } },
-            ],
-          }),
     };
+    const orderBy: Prisma.ArticleOrderByWithRelationInput[] =
+      mode === 'management'
+        ? [{ createdAt: 'desc' }, { id: 'desc' }]
+        : [{ publishedAt: 'desc' }, { id: 'desc' }];
     const [total, data] = await this.prisma.$transaction([
       this.prisma.article.count({ where }),
+      // Management lists omit the heavy `content` JSON; the public
+      // list needs it (renderers fetch the full block list).
       this.prisma.article.findMany({
         where,
         include: ARTICLE_INCLUDE,
-        orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
+        ...(mode === 'management' ? { omit: { content: true } } : {}),
+        orderBy,
         skip: page.skip,
         take: page.take,
       }),
     ]);
     return { data, total };
+  }
+
+  /**
+   * `q` search. Prisma's `contains` cannot express an ESCAPE clause, so
+   * the matching-id selection (count + page, consistent inside one
+   * transaction) is raw SQL with a parameterized ILIKE … ESCAPE '\';
+   * `%`, `_` and `\` in the user term are backslash-escaped first so
+   * they match literally. Full rows (with relations) are then loaded
+   * through Prisma and re-ordered to the raw page order. Backed by the
+   * pg_trgm GIN indexes on articles(title)/(excerpt) (see migrations).
+   */
+  private async searchList(
+    blogId: string,
+    filters: ArticleListFilters & { q: string },
+    page: Page,
+    mode: 'management' | 'public',
+  ): Promise<{
+    data: ArticleListItem[] | ArticleWithRelations[];
+    total: number;
+  }> {
+    const pattern = `%${escapeLikeTerm(filters.q)}%`;
+    // Explicit casts: the parameters arrive as text; the columns are
+    // uuid / enum-typed.
+    const where = Prisma.sql`
+      "blogId" = ${blogId}::uuid
+      ${filters.status === undefined ? Prisma.empty : Prisma.sql`AND "status" = ${filters.status}::"ArticleStatus"`}
+      ${filters.authorId === undefined ? Prisma.empty : Prisma.sql`AND "authorId" = ${filters.authorId}::uuid`}
+      ${filters.categoryId === undefined ? Prisma.empty : Prisma.sql`AND "categoryId" = ${filters.categoryId}::uuid`}
+      ${filters.tagId === undefined ? Prisma.empty : Prisma.sql`AND id IN (SELECT "A" FROM "_ArticleToTag" WHERE "B" = ${filters.tagId}::uuid)`}
+      AND ("title" ILIKE ${pattern} ESCAPE '\\' OR "excerpt" ILIKE ${pattern} ESCAPE '\\')
+    `;
+    const order =
+      mode === 'management'
+        ? Prisma.sql`ORDER BY "createdAt" DESC, id DESC`
+        : Prisma.sql`ORDER BY "publishedAt" DESC NULLS LAST, id DESC`;
+    const [countRows, idRows] = await this.prisma.$transaction([
+      this.prisma.$queryRaw<{ count: number }[]>(
+        Prisma.sql`SELECT count(*)::int AS count FROM articles WHERE ${where}`,
+      ),
+      this.prisma.$queryRaw<{ id: string }[]>(
+        Prisma.sql`SELECT id FROM articles WHERE ${where} ${order} OFFSET ${page.skip} LIMIT ${page.take}`,
+      ),
+    ]);
+    const total = countRows[0]?.count ?? 0;
+    const ids = idRows.map((row) => row.id);
+    if (ids.length === 0) {
+      return { data: [], total };
+    }
+    const found = await this.prisma.article.findMany({
+      where: { id: { in: ids } },
+      include: ARTICLE_INCLUDE,
+      ...(mode === 'management' ? { omit: { content: true } } : {}),
+    });
+    const byId = new Map(found.map((a) => [a.id, a]));
+    return { data: ids.map((id) => byId.get(id)).filter(isPresent), total };
   }
 
   /**
@@ -438,4 +679,74 @@ export class ArticlesService {
     }
     return article;
   }
+
+  private isFreshKey(createdAt: Date): boolean {
+    return createdAt.getTime() >= Date.now() - IDEMPOTENCY_KEY_TTL_MS;
+  }
+
+  /**
+   * Whether a just-thrown error could be the unique-constraint race of
+   * a concurrent replay (same idempotency key or client-supplied id).
+   */
+  private replayAfterRace(
+    idempotencyKey: string | undefined,
+    clientId: string | undefined,
+    error: unknown,
+  ): boolean {
+    if (
+      !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+      error.code !== 'P2002'
+    ) {
+      return false;
+    }
+    const target = error.meta?.target;
+    const fields = Array.isArray(target)
+      ? target.filter((t): t is string => typeof t === 'string')
+      : [];
+    return (
+      (idempotencyKey !== undefined &&
+        fields.some((f) => f.includes('idempotency'))) ||
+      (clientId !== undefined && fields.includes('id'))
+    );
+  }
+
+  private async findReplayTarget(
+    blogId: string,
+    idempotencyKey: string | undefined,
+    clientId: string | undefined,
+  ): Promise<ArticleWithRelations | null> {
+    let articleId = clientId;
+    if (articleId === undefined && idempotencyKey !== undefined) {
+      const seen = await this.prisma.idempotencyKey.findUnique({
+        where: {
+          key_blogId_endpoint: {
+            key: idempotencyKey,
+            blogId,
+            endpoint: IDEMPOTENCY_ENDPOINT,
+          },
+        },
+      });
+      articleId = seen?.articleId;
+    }
+    if (articleId === undefined) {
+      return null;
+    }
+    return this.prisma.article.findFirst({
+      where: { id: articleId, blogId },
+      include: ARTICLE_INCLUDE,
+    });
+  }
+}
+
+/**
+ * Escape the ILIKE metacharacters (`%`, `_`) and the escape character
+ * itself with backslashes so a user-typed term matches literally. The
+ * SQL side declares `ESCAPE '\\'` (see searchList).
+ */
+function escapeLikeTerm(input: string): string {
+  return input.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+function isPresent<T>(value: T | undefined): value is T {
+  return value !== undefined;
 }

@@ -1,4 +1,4 @@
-import { ArgumentsHost, NotFoundException } from '@nestjs/common';
+import { ArgumentsHost, Logger, NotFoundException } from '@nestjs/common';
 import { AuthGuardError } from '@timonics/auth-guard';
 import { DomainError } from '../../kernel/domain-error';
 import { DomainErrorFilter } from './domain-error.filter';
@@ -131,7 +131,7 @@ describe('DomainErrorFilter', () => {
     expect(response.status).toHaveBeenCalledWith(401);
   });
 
-  it('maps an unmapped domain error to 500 internal.error', () => {
+  it('maps an unlisted domain.* code to 409 via the prefix table', () => {
     const { host, response } = makeHost();
     filter.catch(
       new DomainError(
@@ -237,6 +237,31 @@ describe('DomainErrorFilter', () => {
         message: 'bad related ids',
         meta: { relatedArticleIds: ['a'] },
       });
+    });
+
+    it('ships clientMeta but never the server-only detail', () => {
+      const debugSpy = jest
+        .spyOn(Logger.prototype, 'debug')
+        .mockImplementation(() => undefined);
+      const { host, response } = makeHost();
+      filter.catch(
+        new DomainError(
+          'article.conflict',
+          'stale version',
+          { expectedVersion: 1 },
+          { articleId: 'secret-internal-id' },
+        ),
+        host,
+      );
+      expect(response.json).toHaveBeenCalledWith({
+        code: 'article.conflict',
+        message: 'stale version',
+        meta: { expectedVersion: 1 },
+      });
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('secret-internal-id'),
+      );
+      debugSpy.mockRestore();
     });
   });
 });

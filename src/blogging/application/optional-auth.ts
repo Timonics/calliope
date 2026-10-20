@@ -1,9 +1,6 @@
 import type { Request } from 'express';
-import {
-  extractBearerToken,
-  JwksPrincipalProvider,
-  Principal,
-} from '@timonics/auth-guard';
+import { extractBearerToken } from '@timonics/auth-guard';
+import type { Principal, PrincipalProvider } from '@timonics/auth-guard';
 
 /**
  * `OPTIONAL_PRINCIPAL_RESOLVER` — resolves a principal for routes that
@@ -19,13 +16,14 @@ import {
  * this resolver:
  *
  *   * no `Authorization` header → `undefined` (public view);
- *   * header present → verify locally against the cerberus JWKS (same
- *     provider the guard uses); invalid/expired tokens surface as the
- *     package's 401 `authorization.token.invalid`.
+ *   * header present → verify locally against the cerberus JWKS — the
+ *     SAME shared `PrincipalProvider` instance the guard uses (injected
+ *     via DI from AuthGuardModule), so no second jose/JWKS instance is
+ *     constructed; invalid/expired tokens surface as the package's 401
+ *     `authorization.token.invalid`.
  *
  * The instance is registered in `BloggingModule` so integration tests
- * can stub it out; production wiring builds a `JwksPrincipalProvider`
- * from `config.ts`.
+ * can stub it out.
  */
 export interface OptionalPrincipalResolver {
   resolve(request: Request): Promise<Principal | undefined>;
@@ -36,13 +34,7 @@ export const OPTIONAL_PRINCIPAL_RESOLVER = Symbol(
 );
 
 export class JwksOptionalPrincipalResolver implements OptionalPrincipalResolver {
-  private readonly provider: JwksPrincipalProvider;
-
-  public constructor(
-    options: ConstructorParameters<typeof JwksPrincipalProvider>[0],
-  ) {
-    this.provider = new JwksPrincipalProvider(options);
-  }
+  public constructor(private readonly provider: PrincipalProvider) {}
 
   public async resolve(request: Request): Promise<Principal | undefined> {
     if (extractBearerToken(request) === null) {
