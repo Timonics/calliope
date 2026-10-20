@@ -176,4 +176,67 @@ describe('DomainErrorFilter', () => {
       message: 'Cannot GET /v1/nope',
     });
   });
+
+  describe('suffix table (<resource>.<reason> blogging codes)', () => {
+    it('maps *.not_found to 404', () => {
+      const { host, response } = makeHost();
+      filter.catch(new DomainError('blog.not_found', 'blog not found'), host);
+      expect(response.status).toHaveBeenCalledWith(404);
+      expect(response.json).toHaveBeenCalledWith({
+        code: 'blog.not_found',
+        message: 'blog not found',
+      });
+    });
+
+    it('maps *.conflict to 409', () => {
+      const { host, response } = makeHost();
+      filter.catch(
+        new DomainError('article.conflict', 'archived is terminal'),
+        host,
+      );
+      expect(response.status).toHaveBeenCalledWith(409);
+    });
+
+    it('maps *.validation to 400', () => {
+      const { host, response } = makeHost();
+      filter.catch(
+        new DomainError('article.validation', 'duplicate related id'),
+        host,
+      );
+      expect(response.status).toHaveBeenCalledWith(400);
+    });
+
+    it('maps *.forbidden to 403', () => {
+      const { host, response } = makeHost();
+      filter.catch(
+        new DomainError('blog.forbidden', 'blog belongs to another tenant'),
+        host,
+      );
+      expect(response.status).toHaveBeenCalledWith(403);
+    });
+
+    it('keeps existing exact codes working alongside the suffix table', () => {
+      const { host, response } = makeHost();
+      filter.catch(
+        new DomainError('http.validation.failed', 'Request validation failed'),
+        host,
+      );
+      expect(response.status).toHaveBeenCalledWith(400);
+    });
+
+    it('includes meta detail in the rendered body when present', () => {
+      const { host, response } = makeHost();
+      filter.catch(
+        new DomainError('article.validation', 'bad related ids', {
+          relatedArticleIds: ['a'],
+        }),
+        host,
+      );
+      expect(response.json).toHaveBeenCalledWith({
+        code: 'article.validation',
+        message: 'bad related ids',
+        meta: { relatedArticleIds: ['a'] },
+      });
+    });
+  });
 });

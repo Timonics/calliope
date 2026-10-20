@@ -14,8 +14,9 @@ import { DomainError } from '../../kernel/domain-error';
  * Global filter mapping thrown errors to `{code, message}` JSON.
  *
  * For `DomainError`s the HTTP status is derived from the error code —
- * exact match first, then a code-prefix table (extend the table as new
- * domains land; unknown codes fall back to 500 so they stay loud):
+ * exact match first, then a code-suffix table, then a code-prefix table
+ * (extend the tables as new domains land; unknown codes fall back to 500
+ * so they stay loud):
  *
  *   * `authentication.token.missing`,
  *     `authorization.token.invalid`,
@@ -25,6 +26,14 @@ import { DomainError } from '../../kernel/domain-error';
  *   * `http.validation.failed` → 400
  *   * `domain.invariant_violation`,
  *     `domain.illegal_state` → 409
+ *
+ * Suffix rules (blogging domain and anything following the
+ * `<resource>.<reason>` convention — checked before the prefix table):
+ *
+ *   * `*.not_found` → 404
+ *   * `*.conflict` → 409
+ *   * `*.validation` → 400
+ *   * `*.forbidden` → 403
  *
  * Framework `HttpException`s (e.g. Nest's NotFoundException for unmatched
  * routes) keep their own status and are rendered as
@@ -158,11 +167,31 @@ export class DomainErrorFilter implements ExceptionFilter {
         return HttpStatus.CONFLICT;
 
       default:
-        // Prefix table — covers codes added to the union before this
-        // switch is updated (`error.code` is `never` here only because
-        // the switch is currently exhaustive).
-        return DomainErrorFilter.statusForPrefix(error.code);
+        // Suffix table (`<resource>.<reason>` convention) first, then
+        // the legacy prefix table — covers codes added to the union
+        // before this switch is updated (`error.code` is `never` here
+        // only because the switch is currently exhaustive).
+        return (
+          DomainErrorFilter.statusForSuffix(error.code) ??
+          DomainErrorFilter.statusForPrefix(error.code)
+        );
     }
+  }
+
+  private static statusForSuffix(code: string): HttpStatus | undefined {
+    if (code.endsWith('.not_found')) {
+      return HttpStatus.NOT_FOUND;
+    }
+    if (code.endsWith('.conflict')) {
+      return HttpStatus.CONFLICT;
+    }
+    if (code.endsWith('.validation')) {
+      return HttpStatus.BAD_REQUEST;
+    }
+    if (code.endsWith('.forbidden')) {
+      return HttpStatus.FORBIDDEN;
+    }
+    return undefined;
   }
 
   private static statusForPrefix(code: string): HttpStatus {

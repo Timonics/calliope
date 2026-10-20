@@ -22,7 +22,23 @@ export type DomainErrorCode =
   | 'http.validation.failed'
   // Generic
   | 'domain.invariant_violation'
-  | 'domain.illegal_state';
+  | 'domain.illegal_state'
+  // Blogging domain — `DomainErrorFilter` maps these by code suffix
+  // (`.not_found` → 404, `.conflict` → 409, `.validation` → 400,
+  // `.forbidden` → 403); the exact codes are listed here so the union
+  // stays exhaustive and typo-prone string casts surface at compile time.
+  | 'blog.not_found'
+  | 'blog.conflict'
+  | 'blog.forbidden'
+  | 'author.not_found'
+  | 'author.conflict'
+  | 'category.not_found'
+  | 'category.conflict'
+  | 'tag.not_found'
+  | 'tag.conflict'
+  | 'article.not_found'
+  | 'article.conflict'
+  | 'article.validation';
 
 export class DomainError extends Error {
   /** Stable, machine-readable error code. UI/SDKs should branch on this. */
@@ -54,7 +70,15 @@ export class DomainError extends Error {
    * are intentionally NOT included here — those belong in audit logs, not in
    * the public error payload.
    */
-  public toJSON(): { code: DomainErrorCode; message: string } {
-    return { code: this.code, message: this.message };
+  public toJSON(): {
+    code: DomainErrorCode;
+    message: string;
+    meta?: Readonly<Record<string, unknown>>;
+  } {
+    return {
+      code: this.code,
+      message: this.message,
+      ...(this.detail === undefined ? {} : { meta: this.detail }),
+    };
   }
 }

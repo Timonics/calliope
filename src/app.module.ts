@@ -13,6 +13,7 @@ import {
   cerberusJwksUrl,
 } from './shared/infrastructure/config';
 import { HealthModule } from './health/health.module';
+import { BloggingModule } from './blogging/blogging.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { HealthModule } from './health/health.module';
     SharedHttpModule,
     PrismaModule,
     HealthModule,
+    BloggingModule,
   ],
   providers: [
     // Order matters: JwtAuthGuard must run before ScopesGuard.
