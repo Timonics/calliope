@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import type { Author, Prisma } from '@prisma/client';
+import type { Author } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { DomainError } from '../../shared/kernel/domain-error';
 import { PrismaService } from '../../shared/infrastructure/prisma/prisma.service';
 import { assertBlogAccess, getBlogOr404 } from './blog-access';
@@ -12,6 +13,8 @@ export interface CreateAuthorInput {
   name: string;
   bio?: string | null;
   avatarUrl?: string | null;
+  /** Public profile links (`[{ label, url }]`), rendered by the byline. */
+  links?: Array<{ label: string; url: string }> | null;
 }
 
 /** PATCH semantics: `null` clears the column, absent keeps it. */
@@ -26,6 +29,7 @@ const PUBLIC_AUTHOR_SELECT = {
   name: true,
   bio: true,
   avatarUrl: true,
+  links: true,
 } satisfies Prisma.AuthorSelect;
 
 export type PublicAuthorListItem = Prisma.AuthorGetPayload<{
@@ -45,7 +49,17 @@ export class AuthorsService {
     // Authors have no slug — the display name is the only handle.
     try {
       return await this.prisma.author.create({
-        data: { id: randomUUID(), blogId, ...input },
+        data: {
+          id: randomUUID(),
+          blogId,
+          name: input.name,
+          bio: input.bio,
+          avatarUrl: input.avatarUrl,
+          links:
+            input.links === null
+              ? Prisma.JsonNull
+              : (input.links as Prisma.InputJsonValue | undefined),
+        },
       });
     } catch (error) {
       rethrowMapped(error, 'author');
@@ -104,7 +118,15 @@ export class AuthorsService {
       // Tenant-scoped write (defense in depth on top of mustExist).
       const result = await this.prisma.author.updateMany({
         where: { id: authorId, blogId },
-        data: input,
+        data: {
+          ...input,
+          links:
+            input.links === undefined
+              ? undefined
+              : input.links === null
+                ? Prisma.JsonNull
+                : (input.links as Prisma.InputJsonValue),
+        },
       });
       if (result.count === 0) {
         throw new DomainError(

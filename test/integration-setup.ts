@@ -85,6 +85,7 @@ export const TRUNCATED_TABLES = [
   'idempotency_keys',
   '_ArticleToTag',
   'articles',
+  'series',
   'tags',
   'categories',
   'authors',

@@ -43,9 +43,14 @@ export type DomainErrorCode =
   | 'category.conflict'
   | 'tag.not_found'
   | 'tag.conflict'
+  | 'series.not_found'
+  | 'series.conflict'
   | 'article.not_found'
   | 'article.conflict'
-  | 'article.validation';
+  | 'article.validation'
+  // 422 — the article contract requires excerpt + coverImage before an
+  // article can become PUBLISHED (exact-match in DomainErrorFilter).
+  | 'article.publish.incomplete';
 
 export class DomainError extends Error {
   /** Stable, machine-readable error code. UI/SDKs should branch on this. */

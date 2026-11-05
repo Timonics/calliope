@@ -24,6 +24,7 @@ import { DomainError } from '../../kernel/domain-error';
  *     `authorization.scope.insufficient`,
  *     `authorization.principal.missing` → 401
  *   * `http.validation.failed` → 400
+ *   * `article.publish.incomplete` → 422
  *   * `domain.invariant_violation`,
  *     `domain.illegal_state` → 409
  *
@@ -166,6 +167,11 @@ export class DomainErrorFilter implements ExceptionFilter {
       // 400 — bad request (input validation)
       case 'http.validation.failed':
         return HttpStatus.BAD_REQUEST;
+
+      // 422 — publish gate: the extended article contract requires
+      // excerpt + coverImage (alt/width/height) before PUBLISHED.
+      case 'article.publish.incomplete':
+        return HttpStatus.UNPROCESSABLE_ENTITY;
 
       // 409 — conflict / domain invariant
       case 'domain.invariant_violation':

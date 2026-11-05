@@ -13,6 +13,37 @@ const uuidArray = (max?: number): z.ZodType<string[]> =>
     ? z.array(z.uuid())
     : z.array(z.uuid()).max(max, `at most ${max} entries`);
 
+/**
+ * Structured hero image — REQUIRED on publish (the service-layer gate
+ * rejects the transition to PUBLISHED without it). `alt` is mandatory
+ * for accessibility; `width`/`height` let renderers reserve layout space
+ * before the image loads.
+ */
+export const coverImageSchema = z.object({
+  url: z.url(),
+  alt: z.string().min(1).max(500),
+  caption: z.string().max(1000).nullable().optional(),
+  credit: z.string().max(500).nullable().optional(),
+  width: z.number().int().positive().max(100_000),
+  height: z.number().int().positive().max(100_000),
+});
+
+export type CoverImage = z.infer<typeof coverImageSchema>;
+
+/** Visible editorial record entry (chronological, rendered as a banner). */
+const correctionSchema = z.object({
+  date: z.iso.datetime(),
+  note: z.string().min(1).max(2000),
+});
+
+/** Per-article SEO overrides; absent keys mean "no override". */
+const seoSchema = z.object({
+  socialImageUrl: z.url().nullable().optional(),
+  socialTitle: z.string().max(300).nullable().optional(),
+  socialDescription: z.string().max(500).nullable().optional(),
+  noIndex: z.boolean().optional(),
+});
+
 export class CreateArticleDto {
   public static readonly schema = z.object({
     /**
@@ -22,10 +53,20 @@ export class CreateArticleDto {
      */
     id: z.uuid().optional(),
     title: z.string().min(1).max(300),
+    subtitle: z.string().max(300).nullable().optional(),
     slug: slugField,
     excerpt: z.string().max(1000).nullable().optional(),
     content: articleContentSchema,
+    coverImage: coverImageSchema.nullable().optional(),
     coverImageUrl: z.url().nullable().optional(),
+    featured: z.boolean().optional(),
+    seriesId: z.uuid().nullable().optional(),
+    seriesPosition: z.number().int().min(1).nullable().optional(),
+    readingTimeMinutes: z.number().int().min(0).nullable().optional(),
+    canonicalUrl: z.url().nullable().optional(),
+    locale: z.string().min(2).max(35).optional(),
+    corrections: z.array(correctionSchema).max(50).optional(),
+    seo: seoSchema.optional(),
     authorId: z.uuid(),
     categoryId: z.uuid().nullable().optional(),
     tagIds: uuidArray(MAX_TAG_IDS_PER_ARTICLE).optional(),
@@ -35,10 +76,20 @@ export class CreateArticleDto {
 
   public id?: string;
   public title!: string;
+  public subtitle?: string | null;
   public slug?: string;
   public excerpt?: string | null;
   public content!: unknown;
+  public coverImage?: CoverImage | null;
   public coverImageUrl?: string | null;
+  public featured?: boolean;
+  public seriesId?: string | null;
+  public seriesPosition?: number | null;
+  public readingTimeMinutes?: number | null;
+  public canonicalUrl?: string | null;
+  public locale?: string;
+  public corrections?: Array<{ date: string; note: string }>;
+  public seo?: z.infer<typeof seoSchema>;
   public authorId!: string;
   public categoryId?: string | null;
   public tagIds?: string[];
@@ -67,10 +118,20 @@ export class UpdateArticleDto {
     .partial();
 
   public title?: string;
+  public subtitle?: string | null;
   public slug?: string;
   public excerpt?: string | null;
   public content?: unknown;
+  public coverImage?: CoverImage | null;
   public coverImageUrl?: string | null;
+  public featured?: boolean;
+  public seriesId?: string | null;
+  public seriesPosition?: number | null;
+  public readingTimeMinutes?: number | null;
+  public canonicalUrl?: string | null;
+  public locale?: string;
+  public corrections?: Array<{ date: string; note: string }>;
+  public seo?: z.infer<typeof seoSchema>;
   public authorId?: string;
   public categoryId?: string | null;
   public tagIds?: string[];

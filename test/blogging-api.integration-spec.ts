@@ -46,6 +46,7 @@ interface AuthorDto {
   name: string;
   bio?: string | null;
   avatarUrl?: string | null;
+  links?: Array<{ label: string; url: string }> | null;
   blogId?: string;
   createdAt?: string;
 }
@@ -78,6 +79,7 @@ interface ArticleDto {
   slug: string;
   title: string;
   excerpt?: string | null;
+  coverImage?: unknown;
   coverImageUrl?: string | null;
   categoryId?: string | null;
   status?: string;
@@ -237,10 +239,22 @@ describeWithDb('Blogging API lifecycle', () => {
     blogId: string,
     articleId: string,
   ): Promise<ArticleDto> => {
+    // The extended contract requires excerpt + coverImage at publish
+    // time (422 article.publish.incomplete otherwise), so the helper
+    // supplies them alongside the status transition.
     const res = await asOrgA(
       request(server)
         .patch(`/v1/blogs/${blogId}/articles/${articleId}`)
-        .send({ status: 'PUBLISHED' }),
+        .send({
+          status: 'PUBLISHED',
+          excerpt: 'A one-sentence takeaway for the publish gate.',
+          coverImage: {
+            url: 'https://example.com/cover.png',
+            alt: 'Test cover image',
+            width: 1600,
+            height: 900,
+          },
+        }),
     ).expect(200);
     return res.body as ArticleDto;
   };
@@ -318,13 +332,7 @@ describeWithDb('Blogging API lifecycle', () => {
       relatedArticleIds: [article1.id],
     });
 
-    const published = (
-      await asOrgA(
-        request(server)
-          .patch(`/v1/blogs/${blog.id}/articles/${article1.id}`)
-          .send({ status: 'PUBLISHED' }),
-      ).expect(200)
-    ).body as ArticleDto;
+    const published = await publishArticle(blog.id, article1.id);
     expect(published.status).toBe('PUBLISHED');
     expect(new Date(published.publishedAt ?? '')).toBeInstanceOf(Date);
     expect(published.version).toBe(1); // any update bumps the version
@@ -610,6 +618,12 @@ describeWithDb('Blogging API lifecycle', () => {
     const alpha = await createArticle(blog.id, {
       title: 'Alpha Post',
       excerpt: 'about alpha things',
+      coverImage: {
+        url: 'https://example.com/a.png',
+        alt: 'Alpha cover',
+        width: 800,
+        height: 450,
+      },
       content: CONTENT,
       authorId: author1.id,
       categoryId: category1.id,
@@ -627,6 +641,12 @@ describeWithDb('Blogging API lifecycle', () => {
     const gamma = await createArticle(blog.id, {
       title: 'Gamma',
       excerpt: 'contains 100% literal',
+      coverImage: {
+        url: 'https://example.com/g.png',
+        alt: 'Gamma cover',
+        width: 800,
+        height: 450,
+      },
       content: CONTENT,
       authorId: author1.id,
       categoryId: category2.id,
@@ -880,17 +900,28 @@ describeWithDb('Blogging API lifecycle', () => {
 
     const ARTICLE_KEYS = [
       'author',
+      'canonicalUrl',
       'category',
       'content',
+      'corrections',
+      'coverImage',
       'coverImageUrl',
       'excerpt',
+      'featured',
       'id',
+      'locale',
       'publishedAt',
+      'readingTimeMinutes',
+      'seo',
+      'series',
       'slug',
+      'subtitle',
       'tags',
       'title',
+      'updatedAt',
     ];
-    const AUTHOR_KEYS = ['avatarUrl', 'bio', 'id', 'name'];
+    const AUTHOR_KEYS = ['avatarUrl', 'bio', 'id', 'links', 'name'];
+    const CATEGORY_KEYS = ['description', 'id', 'name', 'slug'];
     const TAXONOMY_KEYS = ['id', 'name', 'slug'];
 
     const sortedKeys = (value: object): string[] => Object.keys(value).sort();
@@ -911,7 +942,7 @@ describeWithDb('Blogging API lifecycle', () => {
     ).body as Record<string, unknown>;
     expect(sortedKeys(detail)).toEqual(ARTICLE_KEYS);
     expect(sortedKeys(detail.author ?? {})).toEqual(AUTHOR_KEYS);
-    expect(sortedKeys(detail.category ?? {})).toEqual(TAXONOMY_KEYS);
+    expect(sortedKeys(detail.category ?? {})).toEqual(CATEGORY_KEYS);
     expect(sortedKeys((detail.tags as unknown[])[0] as object)).toEqual(
       TAXONOMY_KEYS,
     );
@@ -920,6 +951,13 @@ describeWithDb('Blogging API lifecycle', () => {
     // public projections (no recursive `related`).
     await createArticle(blog.id, {
       title: 'Other',
+      excerpt: 'another teaser',
+      coverImage: {
+        url: 'https://example.com/o.png',
+        alt: 'Other cover',
+        width: 800,
+        height: 450,
+      },
       content: CONTENT,
       authorId: author.id,
       status: 'PUBLISHED',
@@ -945,6 +983,8 @@ describeWithDb('Blogging API lifecycle', () => {
       'blogId',
       'authorId',
       'categoryId',
+      'seriesId',
+      'seriesPosition',
       'status',
       'relatedArticleIds',
       'version',
@@ -1211,7 +1251,19 @@ describeWithDb('Blogging API lifecycle', () => {
         await asOrgA(
           request(server)
             .post(`/v1/blogs/${blog.id}/articles`)
-            .send({ title, content, authorId: author.id, status: 'PUBLISHED' }),
+            .send({
+              title,
+              excerpt: `${title} excerpt`,
+              coverImage: {
+                url: 'https://example.com/search.png',
+                alt: 'Search cover',
+                width: 800,
+                height: 450,
+              },
+              content,
+              authorId: author.id,
+              status: 'PUBLISHED',
+            }),
         ).expect(201)
       ).body as ArticleDto;
       expect(created.status).toBe('PUBLISHED');
@@ -1357,5 +1409,344 @@ describeWithDb('Blogging API lifecycle', () => {
     await asOrgA(
       request(server).delete(`/v1/blogs/${blog.id}/categories/${category.id}`),
     ).expect(204);
+  });
+
+  // -------------------------------------------------------------------
+  // extended article contract: publish gate + series
+  // -------------------------------------------------------------------
+
+  const VALID_COVER = {
+    url: 'https://example.com/cover.png',
+    alt: 'A descriptive alt text',
+    width: 1600,
+    height: 900,
+  };
+
+  it('publish gate: excerpt + coverImage are required to become PUBLISHED (422)', async () => {
+    const blog = await provisionBlog();
+    const author = await createAuthor(blog.id, 'Ada Lovelace');
+
+    // Create directly as PUBLISHED without the requirements → 422.
+    const missingBoth = await asOrgA(
+      request(server).post(`/v1/blogs/${blog.id}/articles`).send({
+        title: 'Bare',
+        content: CONTENT,
+        authorId: author.id,
+        status: 'PUBLISHED',
+      }),
+    ).expect(422);
+    expect((missingBoth.body as ErrorDto).code).toBe(
+      'article.publish.incomplete',
+    );
+    expect((missingBoth.body as ErrorDto).meta?.missing).toEqual([
+      'excerpt',
+      'coverImage',
+    ]);
+
+    // Excerpt alone is not enough (coverImage.alt/width/height required).
+    const missingCover = await asOrgA(
+      request(server).post(`/v1/blogs/${blog.id}/articles`).send({
+        title: 'No cover',
+        excerpt: 'Has an excerpt',
+        content: CONTENT,
+        authorId: author.id,
+        status: 'PUBLISHED',
+      }),
+    ).expect(422);
+    expect(
+      ((missingCover.body as ErrorDto).meta?.missing as string[]).sort(),
+    ).toEqual(['coverImage']);
+
+    // Legacy coverImageUrl alone does NOT satisfy the gate.
+    const legacyOnly = await asOrgA(
+      request(server).post(`/v1/blogs/${blog.id}/articles`).send({
+        title: 'Legacy cover',
+        excerpt: 'Has an excerpt',
+        coverImageUrl: 'https://example.com/legacy.png',
+        content: CONTENT,
+        authorId: author.id,
+        status: 'PUBLISHED',
+      }),
+    ).expect(422);
+    expect((legacyOnly.body as ErrorDto).code).toBe(
+      'article.publish.incomplete',
+    );
+
+    // Complete payload publishes fine.
+    const ok = await createArticle(blog.id, {
+      title: 'Complete',
+      excerpt: 'A takeaway.',
+      coverImage: VALID_COVER,
+      content: CONTENT,
+      authorId: author.id,
+      status: 'PUBLISHED',
+    });
+    expect(ok.status).toBe('PUBLISHED');
+
+    // Drafts are exempt; the gate fires when the draft later publishes.
+    const draft = await createArticle(blog.id, {
+      title: 'Draft exempt',
+      content: CONTENT,
+      authorId: author.id,
+    });
+    expect(draft.status).toBe('DRAFT');
+    const blocked = await asOrgA(
+      request(server)
+        .patch(`/v1/blogs/${blog.id}/articles/${draft.id}`)
+        .send({ status: 'PUBLISHED' }),
+    ).expect(422);
+    expect((blocked.body as ErrorDto).code).toBe('article.publish.incomplete');
+
+    // Supplying the missing fields in the SAME patch satisfies the gate.
+    const unblocked = await asOrgA(
+      request(server).patch(`/v1/blogs/${blog.id}/articles/${draft.id}`).send({
+        status: 'PUBLISHED',
+        excerpt: 'Fixed.',
+        coverImage: VALID_COVER,
+      }),
+    ).expect(200);
+    expect((unblocked.body as ArticleDto).status).toBe('PUBLISHED');
+  });
+
+  it('series: management create, article membership, public §2b read', async () => {
+    const blog = await provisionBlog();
+    const author = await createAuthor(blog.id, 'Ada Lovelace');
+
+    // Unauthenticated create is rejected.
+    await request(server)
+      .post(`/v1/blogs/${blog.id}/series`)
+      .send({ name: 'Shipping Calliope' })
+      .expect(401);
+
+    const series = (
+      await asOrgA(
+        request(server)
+          .post(`/v1/blogs/${blog.id}/series`)
+          .send({ name: 'Shipping Calliope' }),
+      ).expect(201)
+    ).body as { id: string; name: string; slug: string };
+    expect(series.slug).toBe('shipping-calliope');
+
+    // An EXPLICIT duplicate slug under the same blog → 409 (a generated
+    // slug would have auto-suffixed instead, per the slug policy).
+    const dup = await asOrgA(
+      request(server)
+        .post(`/v1/blogs/${blog.id}/series`)
+        .send({ name: 'Shipping Calliope', slug: 'shipping-calliope' }),
+    ).expect(409);
+    expect((dup.body as ErrorDto).code).toBe('series.conflict');
+
+    // A generated slug auto-suffixes instead of conflicting.
+    const suffixed = (
+      await asOrgA(
+        request(server)
+          .post(`/v1/blogs/${blog.id}/series`)
+          .send({ name: 'Shipping Calliope' }),
+      ).expect(201)
+    ).body as { slug: string };
+    expect(suffixed.slug).toBe('shipping-calliope-2');
+
+    // Membership requires a 1-based position.
+    await asOrgA(
+      request(server).post(`/v1/blogs/${blog.id}/articles`).send({
+        title: 'No position',
+        content: CONTENT,
+        authorId: author.id,
+        seriesId: series.id,
+      }),
+    ).expect(400);
+
+    // Cross-blog series id is rejected.
+    const otherBlog = (
+      await asOrgA(
+        request(server).post('/v1/blogs').send({ name: 'Other' }),
+      ).expect(201)
+    ).body as BlogDto;
+    const otherSeries = (
+      await asOrgA(
+        request(server)
+          .post(`/v1/blogs/${otherBlog.id}/series`)
+          .send({ name: 'Foreign' }),
+      ).expect(201)
+    ).body as { id: string };
+    await asOrgA(
+      request(server).post(`/v1/blogs/${blog.id}/articles`).send({
+        title: 'Foreign series',
+        excerpt: 'x',
+        coverImage: VALID_COVER,
+        content: CONTENT,
+        authorId: author.id,
+        seriesId: otherSeries.id,
+        seriesPosition: 1,
+        status: 'PUBLISHED',
+      }),
+    ).expect(404);
+
+    // Two published parts + one draft part (must stay hidden).
+    const part1 = await createArticle(blog.id, {
+      title: 'Part 1',
+      excerpt: 'First.',
+      coverImage: VALID_COVER,
+      content: CONTENT,
+      authorId: author.id,
+      seriesId: series.id,
+      seriesPosition: 1,
+      status: 'PUBLISHED',
+    });
+    const part2 = await createArticle(blog.id, {
+      title: 'Part 2',
+      excerpt: 'Second.',
+      coverImage: VALID_COVER,
+      content: CONTENT,
+      authorId: author.id,
+      seriesId: series.id,
+      seriesPosition: 2,
+      status: 'PUBLISHED',
+    });
+    await createArticle(blog.id, {
+      title: 'Part 3 draft',
+      content: CONTENT,
+      authorId: author.id,
+      seriesId: series.id,
+      seriesPosition: 3,
+    });
+
+    // §2b shape: ordered by position, published only, meta echo.
+    const res = await request(server)
+      .get(`/v1/blogs/${blog.id}/series/shipping-calliope`)
+      .expect(200);
+    const body = res.body as {
+      data: {
+        id: string;
+        name: string;
+        slug: string;
+        articles: Array<{
+          id: string;
+          slug: string;
+          series: { id: string; position: number; total: number } | null;
+        }>;
+      };
+      meta: { total: number; page: number; pageSize: number };
+    };
+    expect(body.data.id).toBe(series.id);
+    expect(body.data.articles.map((a) => a.id)).toEqual([part1.id, part2.id]);
+    expect(body.data.articles.map((a) => a.series?.position)).toEqual([1, 2]);
+    expect(body.data.articles.every((a) => a.series?.total === 2)).toBe(true);
+    expect(body.meta).toEqual({ total: 2, page: 1, pageSize: 100 });
+
+    // The draft part is invisible in the public series read.
+    expect(body.data.articles.some((a) => a.slug === 'part-3-draft')).toBe(
+      false,
+    );
+
+    // Unknown series slug → 404 series.not_found.
+    await request(server)
+      .get(`/v1/blogs/${blog.id}/series/nope`)
+      .expect(404)
+      .expect((r: request.Response) =>
+        expect((r.body as ErrorDto).code).toBe('series.not_found'),
+      );
+  });
+
+  it('extended fields round-trip through management writes and the public projection', async () => {
+    const blog = await provisionBlog();
+    const author = (
+      await asOrgA(
+        request(server)
+          .post(`/v1/blogs/${blog.id}/authors`)
+          .send({
+            name: 'Ada Lovelace',
+            links: [{ label: 'GitHub', url: 'https://github.com/ada' }],
+          }),
+      ).expect(201)
+    ).body as AuthorDto;
+    expect(author.links).toEqual([
+      { label: 'GitHub', url: 'https://github.com/ada' },
+    ]);
+
+    const article = await createArticle(blog.id, {
+      title: 'Full contract',
+      subtitle: 'A dek line',
+      excerpt: 'The takeaway.',
+      coverImage: {
+        ...VALID_COVER,
+        caption: 'A caption',
+        credit: 'A credit',
+      },
+      content: CONTENT,
+      authorId: author.id,
+      featured: true,
+      readingTimeMinutes: 7,
+      canonicalUrl: 'https://example.com/cross-posted',
+      locale: 'en',
+      corrections: [
+        { date: '2026-10-31T12:00:00.000Z', note: 'Fixed a typo.' },
+      ],
+      seo: {
+        socialTitle: 'Social title',
+        socialDescription: 'Social description',
+        noIndex: true,
+      },
+      status: 'PUBLISHED',
+    });
+
+    // The legacy mirror follows coverImage.url on write.
+    expect(article.coverImageUrl).toBe(VALID_COVER.url);
+
+    const publicDetail = (
+      await request(server)
+        .get(`/v1/blogs/${blog.id}/articles/full-contract`)
+        .expect(200)
+    ).body as Record<string, unknown>;
+    expect(publicDetail.subtitle).toBe('A dek line');
+    expect(publicDetail.featured).toBe(true);
+    expect(publicDetail.readingTimeMinutes).toBe(7);
+    expect(publicDetail.canonicalUrl).toBe('https://example.com/cross-posted');
+    expect(publicDetail.locale).toBe('en');
+    expect(publicDetail.updatedAt).toBeTruthy();
+    expect(publicDetail.corrections).toEqual([
+      { date: '2026-10-31T12:00:00.000Z', note: 'Fixed a typo.' },
+    ]);
+    expect(publicDetail.seo).toEqual({
+      socialImageUrl: null,
+      socialTitle: 'Social title',
+      socialDescription: 'Social description',
+      noIndex: true,
+    });
+    expect(publicDetail.series).toBeNull();
+    const publicAuthor = publicDetail.author as { links: unknown };
+    expect(publicAuthor.links).toEqual([
+      { label: 'GitHub', url: 'https://github.com/ada' },
+    ]);
+
+    // Clearing the coverImage on a DRAFT clears the legacy mirror too.
+    // (Doing this on the published article would trip the publish gate —
+    // a published article may not lose its coverImage.)
+    const draftWithCover = await createArticle(blog.id, {
+      title: 'Draft with cover',
+      excerpt: 'x',
+      coverImage: { ...VALID_COVER, caption: 'Cap' },
+      content: CONTENT,
+      authorId: author.id,
+    });
+    const cleared = (
+      await asOrgA(
+        request(server)
+          .patch(`/v1/blogs/${blog.id}/articles/${draftWithCover.id}`)
+          .send({ coverImage: null }),
+      ).expect(200)
+    ).body as ArticleDto;
+    expect(cleared.coverImage).toBeNull();
+    expect(cleared.coverImageUrl).toBeNull();
+
+    // …and clearing it on a PUBLISHED article is rejected by the gate.
+    const blockedClear = await asOrgA(
+      request(server)
+        .patch(`/v1/blogs/${blog.id}/articles/${article.id}`)
+        .send({ coverImage: null }),
+    ).expect(422);
+    expect((blockedClear.body as ErrorDto).code).toBe(
+      'article.publish.incomplete',
+    );
   });
 });

@@ -65,13 +65,13 @@ export class ArticlesController {
     const page = toPage(query);
     const { authorId, categoryId, tagId, q } = query;
     if (principal === undefined) {
-      const { data, total } = await this.articles.listPublic(
+      const { data, total, seriesTotals } = await this.articles.listPublic(
         blogId,
         { authorId, categoryId, tagId, q },
         page,
       );
       return listEnvelope(
-        data.map((article) => toPublicArticle(article)),
+        data.map((article) => toPublicArticle(article, seriesTotals)),
         total,
         page,
       );
@@ -136,12 +136,13 @@ export class ArticlesController {
         `Article ${idOrSlug} does not exist`,
       );
     }
-    const { article, related } = await this.articles.getPublicBySlug(
-      blogId,
-      idOrSlug,
-      query.include === 'related',
-    );
-    return toPublicArticle(article, related ?? undefined);
+    const { article, related, seriesTotals } =
+      await this.articles.getPublicBySlug(
+        blogId,
+        idOrSlug,
+        query.include === 'related',
+      );
+    return toPublicArticle(article, seriesTotals, related ?? undefined);
   }
 
   /**

@@ -1,0 +1,15 @@
+# Build context hygiene — keep the image lean and secret-free.
+node_modules
+dist
+coverage
+.env
+.env.*
+!.env.example
+.git
+.github
+docs
+*.md
+!README.md
+docker-compose.yml
+*.tsbuildinfo
+npm-debug.log*

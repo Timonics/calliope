@@ -1,0 +1,222 @@
+# calliope CI — every gate a deployment needs, on every push and PR.
+#
+# Gates:
+#   verify       lint (no --fix), format, unit tests, build, OpenAPI lint
+#   integration  full suite against a real Postgres 16 (service container)
+#   security     npm audit (high+) + Trivy filesystem scan
+#   sbom         CycloneDX SBOM → license gate → Trivy SBOM scan (artifact kept)
+#   docker       image build + Trivy image scan; pushes to GHCR on main pushes
+#   dependency-review  PR-only: vuln + license check on the dependency diff
+#
+# The docker job only runs after verify + integration + security pass,
+# so a broken or vulnerable tree never ships an image.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: true
+  NODE_VERSION: '22'
+
+jobs:
+  verify:
+    name: lint · format · unit · build · OpenAPI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+      - run: npx prisma generate
+
+      - name: Prettier (check only — CI never rewrites)
+        run: npm run format:check
+
+      - name: ESLint (no --fix on CI)
+        run: npx eslint "{src,apps,libs,test}/**/*.ts"
+
+      - run: npm run test
+      - run: npm run build
+
+      - name: OpenAPI spec lint
+        run: npx @redocly/cli lint docs/openapi.yaml
+
+  integration:
+    name: integration (real Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: calliope_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # The suite applies migrations itself (integration-setup.ts) and
+      # fails loudly when this is unset — a green run that tested
+      # nothing is a false signal.
+      CALLIOPE_TEST_DB: postgres://postgres:postgres@localhost:5432/calliope_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+      - run: npm run test:integration
+
+  security:
+    name: vulnerability scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # Lockfile vulnerability gate — fails on high and critical.
+      - name: npm audit
+        run: npm audit --audit-level=high
+
+      - name: Trivy filesystem scan (lockfile, config, secrets)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+  sbom:
+    name: SBOM + license gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      # CycloneDX SBOM over the installed dependency tree (needs the
+      # npm ci above — syft catalogs node_modules, not the lockfile).
+      - name: Generate SBOM
+        run: |
+          curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin v1.18.1
+          syft dir:. --quiet -o cyclonedx-json=sbom.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.json
+          retention-days: 30
+
+      # Fail on any non-permissive (or missing) dependency license.
+      - name: License gate
+        run: node scripts/check-licenses.mjs sbom.json
+
+      # Scan the SBOM itself against OSV/nvd — catches what npm audit misses.
+      - name: Trivy SBOM scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: sbom
+          scan-ref: sbom.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+  docker:
+    name: image build · scan · push (GHCR)
+    needs: [verify, integration, security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/timonics/calliope
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/timonics/calliope:ci
+            ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image (blocks push consumers, not the registry)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/timonics/calliope:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+  dependency-review:
+    name: dependency review (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vulnerability + license check on the dependency diff
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          license-check: true
+          deny-licenses: AGPL-1.0-or-later, AGPL-3.0-or-later, GPL-1.0-or-later, GPL-2.0-or-later, GPL-3.0-or-later, LGPL-2.0-or-later, LGPL-2.1-or-later, LGPL-3.0-or-later

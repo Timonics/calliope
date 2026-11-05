@@ -10,6 +10,7 @@
   "scripts": {
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"prisma/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"prisma/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
@@ -20,8 +21,11 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:integration": "jest --config ./test/jest-integration.json --runInBand",
     "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
     "prisma:generate": "prisma generate",
-    "db:seed": "ts-node prisma/seed.ts"
+    "prisma:studio": "prisma studio",
+    "db:seed": "ts-node prisma/seed.ts",
+    "db:seed:volume": "ts-node prisma/seed-volume.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
@@ -29,10 +33,12 @@
   "dependencies": {
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",
-    "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/platform-express": "^11.2.8",
     "@prisma/client": "^6.0.0",
     "@timonics/auth-guard": "^0.1.1",
     "dotenv": "^16.4.7",
+    "helmet": "^8.3.0",
+    "prisma": "^6.0.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "zod": "^4.6.7"
@@ -53,7 +59,6 @@
     "globals": "^16.0.0",
     "jest": "^30.0.0",
     "prettier": "^3.4.2",
-    "prisma": "^6.0.0",
     "supertest": "^7.0.0",
     "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
@@ -72,5 +77,9 @@
       "^.+\\.(t|j)s$": "ts-jest"
     },
     "testEnvironment": "node"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.0",
+    "multer": "^2.4.1"
   }
 }

@@ -5,11 +5,13 @@ import { ArticlesService } from './application/articles.service';
 import { AuthorsService } from './application/authors.service';
 import { BlogsService } from './application/blogs.service';
 import { CategoriesService } from './application/categories.service';
+import { SeriesService } from './application/series.service';
 import { TagsService } from './application/tags.service';
 import { ArticlesController } from './interfaces/http/articles.controller';
 import { AuthorsController } from './interfaces/http/authors.controller';
 import { BlogsController } from './interfaces/http/blogs.controller';
 import { CategoriesController } from './interfaces/http/categories.controller';
+import { SeriesController } from './interfaces/http/series.controller';
 import { TagsController } from './interfaces/http/tags.controller';
 import {
   OPTIONAL_PRINCIPAL_RESOLVER,
@@ -45,6 +47,7 @@ import { sharedAuthGuard } from '../shared/infrastructure/auth-guard.module';
     AuthorsController,
     CategoriesController,
     TagsController,
+    SeriesController,
     ArticlesController,
   ],
   providers: [
@@ -52,6 +55,7 @@ import { sharedAuthGuard } from '../shared/infrastructure/auth-guard.module';
     AuthorsService,
     CategoriesService,
     TagsService,
+    SeriesService,
     ArticlesService,
     {
       provide: OPTIONAL_PRINCIPAL_RESOLVER,

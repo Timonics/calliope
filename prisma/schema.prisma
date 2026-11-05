@@ -52,10 +52,30 @@ model Blog {
   categories Category[]
   tags       Tag[]
   articles   Article[]
+  series     Series[]
 
   @@unique([tenantId, slug])
   @@index([tenantId])
   @@map("blogs")
+}
+
+/// A named sequence of articles within a blog (multipart / follow-up
+/// posts). `total` is NOT stored — it is the count of PUBLISHED articles
+/// in the series, computed at read time (see SeriesService / the article
+/// projection) so the emitted number is always true.
+model Series {
+  id        String   @id @db.Uuid
+  blogId    String   @db.Uuid
+  blog      Blog     @relation(fields: [blogId], references: [id], onDelete: Cascade)
+  name      String
+  slug      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  articles Article[]
+
+  @@unique([blogId, slug])
+  @@map("series")
 }
 
 /// A content author scoped to a single blog.
@@ -66,6 +86,9 @@ model Author {
   name      String
   bio       String?
   avatarUrl String?
+  /// Public profile links (`[{ "label", "url" }]`), rendered next to the
+  /// author byline. JSON, not a relation — links are display-only.
+  links     Json     @default("[]")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -140,10 +163,36 @@ model Article {
   categoryId        String?       @db.Uuid
   category          Category?     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   title             String
+  /// One-line dek, shown under the title.
+  subtitle          String?
   slug              String
+  /// REQUIRED on publish — 1-sentence takeaway (enforced in the service
+  /// layer: `assertPublishable`).
   excerpt           String?
   content           Json
+  /// Structured hero image (`{ url, alt, caption?, credit?, width,
+  /// height }`). REQUIRED on publish (alt/width/height included).
+  /// `coverImageUrl` is the legacy mirror of `coverImage.url`, synced on
+  /// write by the service layer.
+  coverImage        Json?
   coverImageUrl     String?
+  /// Editor-picked homepage hero.
+  featured          Boolean       @default(false)
+  /// Multipart-post membership. `seriesPosition` is 1-based and REQUIRED
+  /// whenever `seriesId` is set (service-layer invariant).
+  seriesId          String?       @db.Uuid
+  series            Series?       @relation(fields: [seriesId], references: [id], onDelete: SetNull)
+  seriesPosition    Int?
+  readingTimeMinutes Int?
+  /// For cross-posts / syndication.
+  canonicalUrl      String?
+  /// Content locale; `en` unless overridden.
+  locale            String        @default("en")
+  /// Visible editorial record (`[{ "date", "note" }]`, chronological).
+  corrections       Json          @default("[]")
+  /// SEO overrides (`{ socialImageUrl?, socialTitle?, socialDescription?,
+  /// noIndex? }`); absent keys mean "no override".
+  seo               Json          @default("{}")
   status            ArticleStatus @default(DRAFT)
   publishedAt       DateTime?
   relatedArticleIds String[]      @db.Uuid
@@ -160,6 +209,7 @@ model Article {
   @@index([blogId, status])
   @@index([blogId, categoryId])
   @@index([blogId, authorId])
+  @@index([seriesId, status])
   @@map("articles")
 }
 

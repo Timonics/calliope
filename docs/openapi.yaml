@@ -18,11 +18,17 @@ servers:
     description: local dev
 tags:
   - name: health
+    description: Liveness probe — the only route that needs no token.
   - name: blogs
+    description: Blog registration and per-org listing (management only).
   - name: authors
+    description: Content authors scoped to a blog.
   - name: categories
+    description: Article classification within a blog.
   - name: tags
+    description: Free-form labels; implicit many-to-many with articles.
   - name: articles
+    description: The content unit — drafts, publishing, series, public reads.
 paths:
   /v1/health:
     get:
@@ -437,7 +443,7 @@ paths:
           content:
             application/json:
               schema:
-                oneOf:
+                anyOf:
                   - $ref: '#/components/schemas/ArticleListEnvelope'
                   - $ref: '#/components/schemas/PublicArticleListEnvelope'
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -488,7 +494,7 @@ paths:
           content:
             application/json:
               schema:
-                oneOf:
+                anyOf:
                   - $ref: '#/components/schemas/Article'
                   - $ref: '#/components/schemas/PublicArticle'
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -746,7 +752,7 @@ components:
         data:
           type: array
           items:
-            oneOf:
+            anyOf:
               - $ref: '#/components/schemas/Author'
               - $ref: '#/components/schemas/PublicAuthorItem'
         meta: { $ref: '#/components/schemas/ListMeta' }
@@ -756,7 +762,7 @@ components:
         data:
           type: array
           items:
-            oneOf:
+            anyOf:
               - $ref: '#/components/schemas/Category'
               - $ref: '#/components/schemas/PublicCategoryItem'
         meta: { $ref: '#/components/schemas/ListMeta' }
@@ -766,7 +772,7 @@ components:
         data:
           type: array
           items:
-            oneOf:
+            anyOf:
               - $ref: '#/components/schemas/Tag'
               - $ref: '#/components/schemas/PublicTagItem'
         meta: { $ref: '#/components/schemas/ListMeta' }

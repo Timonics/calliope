@@ -45,6 +45,45 @@ charon's, 5434 is cerberus's.
 Config is read via `src/shared/infrastructure/config.ts` — missing
 required vars throw at boot; there are no silent fallbacks.
 
+## Deployment
+
+Production ships as a single Docker image (`Dockerfile`, multi-stage):
+
+```bash
+docker build -t calliope .
+docker run -p 3002:3002 \
+  -e DATABASE_URL=postgres://… \
+  -e CERBERUS_JWKS_URL=https://cerberus.example.com/.well-known/jwks.json \
+  calliope
+```
+
+- The entrypoint runs `prisma migrate deploy` (idempotent) before the
+  server starts — a fresh container self-initializes an empty database.
+- Runtime image is `node:22-slim`, production deps only, non-root user,
+  built-in `/v1/health` healthcheck, helmet security headers.
+- `docker-compose.yml` in this repo is **local dev only**; production
+  connects to managed Postgres via `DATABASE_URL`.
+- CI builds and pushes the image to GHCR (`ghcr.io/timonics/calliope`)
+  on every push to `main` — see below.
+
+## CI pipeline
+
+`.github/workflows/ci.yml` runs on every push and PR:
+
+| Job                 | Gates                                                        |
+| ------------------- | ------------------------------------------------------------ |
+| `verify`            | prettier check, eslint (no `--fix`), unit tests, build, OpenAPI lint |
+| `integration`       | full suite against real Postgres 16 (service container)      |
+| `security`          | `npm audit --audit-level=high` + Trivy filesystem scan       |
+| `sbom`              | CycloneDX SBOM (artifact, 30d) → license gate → Trivy SBOM scan |
+| `docker`            | image build + Trivy image scan; pushes to GHCR on `main` (after all gates above pass) |
+| `dependency-review` | PR-only: vulnerability + copyleft-license check on the dependency diff |
+
+The license gate (`scripts/check-licenses.mjs`) rejects anything outside
+the permissive allowlist (MIT/ISC/Apache/BSD and equivalents) — and any
+dependency with **no** detectable license, unless it is explicitly added
+to the `EXCEPTIONS` list with a written reason.
+
 ## Architecture
 
 NestJS 11 + Prisma 6 + zod v4, TypeScript strict. Layered bounded context
@@ -94,7 +133,7 @@ Key behaviors:
 | `npm run build` / `start:prod` | compile / run compiled output            |
 | `npm run test`           | unit tests (jest, colocated `*.spec.ts`)       |
 | `npm run test:integration` | DB-backed tests — needs `CALLIOPE_TEST_DB`   |
-| `npm run lint` / `format`| eslint (type-checked) / prettier              |
+| `npm run lint` / `format` / `format:check` | eslint (type-checked) / prettier write / prettier check (CI) |
 | `npm run prisma:migrate` | `prisma migrate dev`                           |
 | `npm run prisma:deploy`  | `prisma migrate deploy` (prod/CI)              |
 

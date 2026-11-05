@@ -2,6 +2,7 @@ import 'dotenv/config';
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { json } from 'express';
+import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { ZodValidationPipe } from './shared/interfaces/http/zod-validation.pipe';
 import { port } from './shared/infrastructure/config';
@@ -24,6 +25,11 @@ async function bootstrap(): Promise<void> {
   // oversized payloads are rejected at the edge (payload-too-large)
   // instead of being parsed and validated first.
   app.use(json({ limit: '1mb' }));
+  // Security headers (CSP off: this is a JSON API with no HTML to protect;
+  // cross-origin access is governed by the Bearer token, not CORS).
+  app.use(
+    helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }),
+  );
   // zod is the only validation layer (no class-validator).
   app.useGlobalPipes(new ZodValidationPipe());
   // Drain in-flight requests on SIGTERM/SIGINT.

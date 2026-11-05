@@ -10,6 +10,7 @@ import { rethrowMapped } from './prisma-errors';
 import { resolveCreateSlug, resolveUpdateSlug } from '../domain/slug';
 import { resolveStatusTransition } from '../domain/article-status';
 import type { ArticleStatus } from '../domain/article-status';
+import { assertPublishable } from '../domain/publish-requirements';
 import { validateRelatedArticleIds } from '../domain/related-articles';
 import type { Page } from './pagination';
 
@@ -20,10 +21,20 @@ export interface CreateArticleInput {
    */
   id?: string;
   title: string;
+  subtitle?: string | null;
   slug?: string;
   excerpt?: string | null;
   content: unknown; // validated upstream by articleContentSchema (DTO pipe)
+  coverImage?: Record<string, unknown> | null;
   coverImageUrl?: string | null;
+  featured?: boolean;
+  seriesId?: string | null;
+  seriesPosition?: number | null;
+  readingTimeMinutes?: number | null;
+  canonicalUrl?: string | null;
+  locale?: string;
+  corrections?: Array<{ date: string; note: string }>;
+  seo?: Record<string, unknown>;
   authorId: string;
   categoryId?: string | null;
   tagIds?: string[];
@@ -52,6 +63,7 @@ export interface ArticleListFilters {
 const ARTICLE_INCLUDE = {
   author: true,
   category: true,
+  series: true,
   tags: { orderBy: { name: 'asc' as const } },
 } satisfies Prisma.ArticleInclude;
 
@@ -110,6 +122,15 @@ export class ArticlesService {
         ? undefined
         : await this.validateRelated(blogId, input.relatedArticleIds);
 
+    if (input.seriesId != null) {
+      await this.assertSeriesInBlog(blogId, input.seriesId);
+    }
+    assertSeriesMembership(
+      input.seriesId ?? null,
+      input.seriesPosition ?? null,
+      input.seriesPosition != null && input.seriesId == null,
+    );
+
     const slug = await resolveCreateSlug({
       provided: input.slug,
       source: input.title,
@@ -124,6 +145,12 @@ export class ArticlesService {
       null,
       new Date(),
     );
+    if (status === 'PUBLISHED') {
+      assertPublishable({
+        excerpt: input.excerpt ?? null,
+        coverImage: input.coverImage ?? null,
+      });
+    }
 
     try {
       return await this.prisma.$transaction(async (tx) => {
@@ -168,10 +195,29 @@ export class ArticlesService {
             authorId: input.authorId,
             categoryId: input.categoryId ?? null,
             title: input.title,
+            subtitle: input.subtitle,
             slug,
             excerpt: input.excerpt,
             content: input.content as Prisma.InputJsonValue,
-            coverImageUrl: input.coverImageUrl,
+            coverImage:
+              input.coverImage === undefined
+                ? undefined
+                : input.coverImage === null
+                  ? Prisma.JsonNull
+                  : (input.coverImage as Prisma.InputJsonValue),
+            coverImageUrl:
+              input.coverImage !== undefined
+                ? ((input.coverImage?.url as string | undefined) ?? null)
+                : input.coverImageUrl,
+            featured: input.featured,
+            seriesId: input.seriesId,
+            seriesPosition:
+              input.seriesId != null ? input.seriesPosition : null,
+            readingTimeMinutes: input.readingTimeMinutes,
+            canonicalUrl: input.canonicalUrl,
+            locale: input.locale,
+            corrections: input.corrections ?? [],
+            seo: (input.seo ?? {}) as unknown as Prisma.InputJsonValue,
             status,
             publishedAt,
             relatedArticleIds: relatedIds ?? [],
@@ -229,12 +275,18 @@ export class ArticlesService {
     return { data: data as ArticleListItem[], total };
   }
 
-  /** Public list — published only, always. */
+  /** Public list — published only, always. `seriesTotals` feeds the
+   *  `series.total` field of the public projection (published-article
+   *  count per series, one groupBy for the whole page). */
   public async listPublic(
     blogId: string,
     filters: ArticleListFilters,
     page: Page,
-  ): Promise<{ data: ArticleWithRelations[]; total: number }> {
+  ): Promise<{
+    data: ArticleWithRelations[];
+    total: number;
+    seriesTotals: Map<string, number>;
+  }> {
     await getBlogOr404(this.prisma, blogId);
     const { data, total } = await this.list(
       blogId,
@@ -242,7 +294,15 @@ export class ArticlesService {
       page,
       'public',
     );
-    return { data: data as ArticleWithRelations[], total };
+    const rows = data as ArticleWithRelations[];
+    return {
+      data: rows,
+      total,
+      seriesTotals: await this.publishedSeriesTotals(
+        blogId,
+        rows.map((a) => a.seriesId),
+      ),
+    };
   }
 
   public async getManagement(
@@ -267,6 +327,7 @@ export class ArticlesService {
   ): Promise<{
     article: ArticleWithRelations;
     related: ArticleWithRelations[] | undefined;
+    seriesTotals: Map<string, number>;
   }> {
     await getBlogOr404(this.prisma, blogId);
     const article = await this.prisma.article.findFirst({
@@ -280,12 +341,25 @@ export class ArticlesService {
       );
     }
     if (!includeRelated) {
-      return { article, related: undefined };
+      return {
+        article,
+        related: undefined,
+        seriesTotals: await this.publishedSeriesTotals(blogId, [
+          article.seriesId,
+        ]),
+      };
     }
     // Public expansion: PUBLISHED related articles only, original
     // curated order, ids that no longer resolve are skipped silently.
     const related = await this.resolveRelated(blogId, article, 'PUBLISHED');
-    return { article, related };
+    return {
+      article,
+      related,
+      seriesTotals: await this.publishedSeriesTotals(blogId, [
+        article.seriesId,
+        ...related.map((a) => a.seriesId),
+      ]),
+    };
   }
 
   /**
@@ -359,6 +433,35 @@ export class ArticlesService {
       new Date(),
     );
 
+    if (input.seriesId !== undefined && input.seriesId !== null) {
+      await this.assertSeriesInBlog(blogId, input.seriesId);
+    }
+    const effectiveSeriesId =
+      input.seriesId === undefined ? current.seriesId : input.seriesId;
+    const effectiveSeriesPosition =
+      input.seriesPosition === undefined
+        ? current.seriesPosition
+        : input.seriesPosition;
+    assertSeriesMembership(
+      effectiveSeriesId,
+      effectiveSeriesPosition,
+      input.seriesId === undefined &&
+        input.seriesPosition != null &&
+        current.seriesId === null,
+    );
+    if (status === 'PUBLISHED') {
+      // Gate on the EFFECTIVE values (current row merged with the patch)
+      // so a draft can never publish by PATCHing status alone while the
+      // stored article still lacks the contract requirements.
+      assertPublishable({
+        excerpt: input.excerpt === undefined ? current.excerpt : input.excerpt,
+        coverImage:
+          input.coverImage === undefined
+            ? current.coverImage
+            : input.coverImage,
+      });
+    }
+
     try {
       return await this.prisma.$transaction(async (tx) => {
         const result = await tx.article.updateMany({
@@ -369,13 +472,42 @@ export class ArticlesService {
           },
           data: {
             title: input.title,
+            subtitle: input.subtitle,
             slug,
             excerpt: input.excerpt,
             content:
               input.content === undefined
                 ? undefined
                 : (input.content as Prisma.InputJsonValue),
-            coverImageUrl: input.coverImageUrl,
+            coverImage:
+              input.coverImage === undefined
+                ? undefined
+                : input.coverImage === null
+                  ? Prisma.JsonNull
+                  : (input.coverImage as Prisma.InputJsonValue),
+            coverImageUrl:
+              input.coverImage !== undefined
+                ? ((input.coverImage?.url as string | undefined) ?? null)
+                : input.coverImageUrl,
+            featured: input.featured,
+            seriesId: input.seriesId,
+            seriesPosition:
+              input.seriesId === undefined && input.seriesPosition === undefined
+                ? undefined
+                : effectiveSeriesId === null
+                  ? null
+                  : effectiveSeriesPosition,
+            readingTimeMinutes: input.readingTimeMinutes,
+            canonicalUrl: input.canonicalUrl,
+            locale: input.locale,
+            corrections:
+              input.corrections === undefined
+                ? undefined
+                : (input.corrections as unknown as Prisma.InputJsonValue),
+            seo:
+              input.seo === undefined
+                ? undefined
+                : (input.seo as unknown as Prisma.InputJsonValue),
             authorId: input.authorId,
             categoryId: input.categoryId,
             status,
@@ -628,6 +760,47 @@ export class ArticlesService {
     }
   }
 
+  private async assertSeriesInBlog(
+    blogId: string,
+    seriesId: string,
+  ): Promise<void> {
+    const series = await this.prisma.series.findFirst({
+      where: { id: seriesId, blogId },
+      select: { id: true },
+    });
+    if (!series) {
+      throw new DomainError(
+        'series.not_found',
+        `Series ${seriesId} does not exist in blog ${blogId}`,
+      );
+    }
+  }
+
+  /**
+   * Published-article count per series, for the projection's `total`.
+   * Computed, never stored — a cached count would drift when articles
+   * are unpublished or deleted. One groupBy per page/detail response.
+   */
+  private async publishedSeriesTotals(
+    blogId: string,
+    seriesIds: readonly (string | null)[],
+  ): Promise<Map<string, number>> {
+    const unique = [
+      ...new Set(seriesIds.filter((id): id is string => id !== null)),
+    ];
+    if (unique.length === 0) {
+      return new Map();
+    }
+    const grouped = await this.prisma.article.groupBy({
+      by: ['seriesId'],
+      where: { blogId, status: 'PUBLISHED', seriesId: { in: unique } },
+      _count: { _all: true },
+    });
+    return new Map(
+      grouped.map((g) => [g.seriesId as string, g._count._all] as const),
+    );
+  }
+
   /** Replace-set semantics: returns the validated tag ids. */
   private async assertTagsInBlog(
     blogId: string,
@@ -735,6 +908,26 @@ export class ArticlesService {
       where: { id: articleId, blogId },
       include: ARTICLE_INCLUDE,
     });
+  }
+}
+
+/**
+ * Series membership invariant: a 1-based `seriesPosition` is required
+ * exactly when the article belongs to a series. `contradictory` covers
+ * the PATCH smell of setting a position on an article that belongs to
+ * no series (or implicitly clearing the series while keeping one).
+ */
+function assertSeriesMembership(
+  seriesId: string | null,
+  seriesPosition: number | null,
+  contradictory: boolean,
+): void {
+  if (contradictory || (seriesId !== null && seriesPosition === null)) {
+    throw new DomainError(
+      'http.validation.failed',
+      'seriesPosition (1-based) is required exactly when seriesId is set',
+      { seriesId, seriesPosition },
+    );
   }
 }
 
