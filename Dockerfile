@@ -43,6 +43,14 @@ FROM node:22-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
+# The base image bundles npm 10.9.x, which ships a vulnerable `sigstore`
+# (CVE-2026-48815). The runtime never verifies package signatures, but
+# image vulnerability scans still flag it. Upgrading the global npm
+# replaces that tree — npm 11.21+/12 no longer depend on `sigstore` at
+# all — so the flagged package leaves the image. Pinned, not @latest.
+RUN npm install -g npm@12.2.2 \
+  && npm --version
+
 RUN groupadd --system calliope \
   && useradd --system --gid calliope --home-dir /app calliope
 
