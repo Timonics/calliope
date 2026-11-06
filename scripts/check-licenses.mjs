@@ -111,17 +111,15 @@ for (const component of sbom.components ?? []) {
 
 if (undocumented.length > 0 || rejected.length > 0) {
   console.error('license gate: FAILED');
-  for (const name of undocumented) {
+  for (const name of [...new Set(undocumented)].sort()) {
     console.error(
       `  no license detected: ${name} — add it to EXCEPTIONS in scripts/check-licenses.mjs with a reason`,
     );
   }
-  for (const entry of rejected) {
+  for (const entry of [...new Set(rejected)].sort()) {
     console.error(`  non-allowlisted license: ${entry}`);
   }
-  console.error(
-    `allowed: ${[...ALLOWED].sort().join(', ')}`,
-  );
+  console.error(`allowed: ${[...ALLOWED].sort().join(', ')}`);
   process.exit(1);
 }
 

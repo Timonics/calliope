@@ -125,10 +125,14 @@ jobs:
 
       # CycloneDX SBOM over the installed dependency tree (needs the
       # npm ci above — syft catalogs node_modules, not the lockfile).
+      # Scoped to the npm cataloger on purpose: the default catalog set
+      # also picks up .github/workflows YAML and reports every `uses:`
+      # action as a component — those are CI tooling references, not
+      # dependencies, and carry no license metadata.
       - name: Generate SBOM
         run: |
           curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin v1.18.1
-          syft dir:. --quiet -o cyclonedx-json=sbom.json
+          syft dir:. --override-default-catalogers npm --quiet -o cyclonedx-json=sbom.json
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
