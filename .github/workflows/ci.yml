@@ -1,15 +1,20 @@
-# calliope CI — every gate a deployment needs, on every push and PR.
+# calliope CI — a gated pipeline; every stage runs only when the stages
+# above it are green (GitHub Actions `needs:` — there are no "stages",
+# the DAG is the flow):
 #
-# Gates:
-#   verify       lint (no --fix), format, unit tests, build, OpenAPI lint
-#   integration  full suite against a real Postgres 16 (service container)
-#   security     npm audit (high+) + Trivy filesystem scan
-#   sbom         CycloneDX SBOM → license gate → Trivy SBOM scan (artifact kept)
-#   docker       image build + Trivy image scan; pushes to GHCR on main pushes
-#   dependency-review  PR-only: vuln + license check on the dependency diff
+#   verify  ─────────────────────────────────────────┐
+#   (prettier, eslint, unit tests, build, OpenAPI)   │
+#        │                                           │
+#        ├─→ integration ─┐                          │
+#        ├─→ security ────┼─→ docker ──→ GHCR        │
+#        └─→ sbom ────────┘   (build + Trivy image   │
+#                              scan, push on main)   │
+#                                                    │
+#   dependency-review (PR only, runs alongside) ─────┘
 #
-# The docker job only runs after verify + integration + security pass,
-# so a broken or vulnerable tree never ships an image.
+# A red verify stops everything downstream — no point scanning or
+# shipping code that doesn't compile; the parallel middle tier keeps
+# the expensive checks independent of each other.
 
 name: CI
 
@@ -55,6 +60,7 @@ jobs:
 
   integration:
     name: integration (real Postgres)
+    needs: verify
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -88,6 +94,7 @@ jobs:
 
   security:
     name: vulnerability scans
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -112,6 +119,7 @@ jobs:
 
   sbom:
     name: SBOM + license gate
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -157,7 +165,9 @@ jobs:
 
   docker:
     name: image build · scan · push (GHCR)
-    needs: [verify, integration, security]
+    # Only build (let alone push) an image when every upstream gate is
+    # green — verify ran first, then integration + security + sbom.
+    needs: [integration, security, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: read
